@@ -17,3 +17,10 @@ out/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 构建监控临时日志
+build_status.txt
