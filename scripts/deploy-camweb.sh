@@ -9,9 +9,11 @@ systemctl is-active mediamtx || { echo "MediaMTX 未启动"; journalctl -u media
 ss -tln | grep -E ':8554|:8888' && echo "  MediaMTX 端口 OK"
 
 echo "=== 2. 安装 camweb ==="
-mkdir -p /opt/camweb
+mkdir -p /opt/camweb/static
+rm -rf /opt/camweb/static/*
 install -m 755 /root/camweb.py /opt/camweb/camweb.py
 install -m 644 /root/index.html  /opt/camweb/index.html
+install -m 644 /root/hls.min.js  /opt/camweb/static/hls.min.js
 install -m 644 /root/camweb.service /etc/systemd/system/camweb.service
 systemctl daemon-reload
 systemctl enable camweb >/dev/null 2>&1 || true

@@ -5,17 +5,61 @@
 
 ## 功能
 
-三种采集 / 编码模式，网页一键切换：
+四种采集 / 编码模式，网页一键切换：
 
-| 模式 | 链路 | 说明 |
+| 模式 | 链路 | 实测（1920×1080@30） |
 |---|---|---|
-| `passthrough` | 摄像头 H.264 → `-c copy` → RTSP | 摄像头自带编码，仅转发，**CPU≈5%** |
-| `hwenc` | 摄像头 MJPEG → `h264_rkmpp` 硬件编码 → RTSP | **核心验证**：VPU 硬件编码 H.264 |
-| `mjpeg` | 摄像头 MJPEG → 本服务 multipart 直出 | 零编码、最低延迟看原始画质 |
+| `passthrough` | 摄像头 H.264 → `-c copy` → RTSP | 30fps / **CPU 5%**，画质零损失 |
+| `hwenc` | 摄像头 MJPEG → 解码 → `h264_rkmpp` 硬编 | **30fps / CPU ~50%**（软解路径） |
+| `mjpeg` | 摄像头 MJPEG → 本服务 multipart 直出 | 30fps / CPU 8%，零编码最低延迟 |
+| `testpat` | lavfi 测试图 → `h264_rkmpp` 硬编 | 不接摄像头也能验证整条链路 |
 
-* 硬编码 / 直通走 MediaMTX 的 HLS，前端用 hls.js 播放（同源代理避开 CORS）。
+* 硬编 / 直通 / 测试图走 MediaMTX 的 **LL-HLS**，前端用 hls.js 播放（同源代理避开 CORS）。
 * MJPEG 模式走本服务的 `/video/mjpeg`（multipart/x-mixed-replace），前端用 `<img>`。
-* 页面实时显示：帧率、码率、ffmpeg 进程 CPU、运行时长、当前 ffmpeg 命令行。
+* 页面实时显示：**实际帧率（剔除补帧）**、输出帧率、码率、ffmpeg CPU、运行时长、最近 ffmpeg 日志。
+
+### 帧率统计陷阱（务必注意）
+ffmpeg 的 `fps=` 是**补帧后**的输出帧率。源跟不上时 ffmpeg 会插入重复帧凑数，
+于是 16fps 的真实处理能力会显示成 27fps，看起来"很正常"。
+本服务同时解析 `frame=` / `dup=` / `time=`，算出 **真实帧率 = (frame − dup) / time**，
+在页面上单列一格「实际帧率」。所有性能结论都应以它为准。
+
+## 关键设计
+
+### 1. hls.js 本地托管（离线可用）
+`static/hls.min.js` 由本服务 `/static/` 提供，**不依赖任何外网 CDN**。
+> 早期版本从 `cdn.jsdelivr.net` 加载 hls.js：查看端无外网时 `window.Hls` 为 undefined，
+> 播放器根本没装上 → HLS 两个模式全黑屏，而 MJPEG 用的原生 `<img>` 照常出画面。
+
+### 2. 摄像头自动探测
+不再硬编码 `/dev/video1`（重新插拔后节点号会变）。启动时扫描 `/dev/video*`，
+挑出**支持 MJPG/H264** 的 UVC 节点（自动跳过 `rockchip-rga` 之类的 mem2mem 节点）。
+后台每 3s 刷新一次，未找到时只缓存 3s，插回摄像头即可自动恢复。
+
+### 3. hwenc 解码路径可选（性能关键）
+`hwenc` 支持三种解码路径，页面可切换，首选失败会自动回退：
+
+| `decode` | 参数 | 真实帧率 @1080p | 说明 |
+|---|---|---|---|
+| **`sw`（默认）** | — | **30.0 fps** | CPU 软解 MJPEG + VPU 硬编，19.5s 只有 1 帧补帧 |
+| `zero` | `-hwaccel rkmpp -hwaccel_output_format drm_prime` | 20.0 fps | 零拷贝，帧留 DMA 缓冲直喂编码器 |
+| `hw` | `-c:v mjpeg_rkmpp` | 16.7 fps | VPU 硬解 MJPEG |
+
+> **反直觉但实测如此**：CPU 调频修复前（锁 600MHz）软解只有 12fps，零拷贝(20fps)明显更优；
+> 修复后 CPU 到 1.4/1.8GHz，软解直接跑满 30fps，反而超过两条硬解路径——
+> 因为 RK3399 的 MJPEG 硬件解码器本身只有 ~17-20fps 产能（VEPU 编码器则有 45fps）。
+> 结论：**解码路径的选择取决于 CPU 频率状态**，这里把它做成可切换项而不是写死。
+
+### 4. 启动快速失败 + 错误上屏
+`/api/start` 会等 1s 探测 ffmpeg 是否立刻退出（设备不存在 / 被占用 / 格式不支持），
+把 stderr 尾部原因直接回给前端显示，而不是让页面以为「已启动」。
+日志中的 `mpp[...]` 底层噪声会被过滤掉，只留 ffmpeg 自己的信息行。
+
+### 5. 不会卡死
+- 锁用 `RLock`；`stop_pipeline()` 在锁外做进程回收（普通 `Lock` + 嵌套调用会自死锁，
+  表现为「已有流在跑时点开始，整个服务永久卡住」）。
+- `send_error()` 的消息只用 ASCII（状态行仅允许 latin-1，中文会抛 `UnicodeEncodeError` 并丢连接）。
+- MJPEG 长连接在流停止时主动断开，避免连接线程泄漏。
 
 ## 运行
 
@@ -41,25 +85,54 @@ http://<板子IP>:8080/
 
 例：板子在 `10.0.0.18` → `http://10.0.0.18:8080/`
 
-打开后：选模式 → 调分辨率/帧率（硬编还可调码率/GOP）→ 点「开始」。
-* 硬编/直通：画面经 MediaMTX HLS 延迟约 2–4 秒（HLS 固有缓冲）。
-* 想要更低延迟：用 MediaMTX 自带 WebRTC 播放器 `http://<板子IP>:8889/cam/`。
+打开后：选模式 → 调分辨率/帧率（硬编/测试图还可调码率、GOP）→ 点「开始」。
+
+* HLS 延迟约 1–2 秒（LL-HLS，`hlsPartDuration 200ms`）。
+* 想要更低延迟 / 兜底：MediaMTX 自带 WebRTC 播放器 `http://<板子IP>:8889/cam`（**无需任何 JS 库**）；
+  RTSP `rtsp://<板子IP>:8554/cam`。
 
 ## 接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/camera` | 探测摄像头支持的格式/分辨率/帧率 |
-| POST | `/api/start` | body `{mode,width,height,fps,bitrate,gop}` 启动管线 |
+| GET | `/api/camera` | 探测摄像头（`?force=1` 强制重新扫描）；返回 `device/available/formats` |
+| POST | `/api/start` | body `{mode,width,height,fps,bitrate,gop}`，mode ∈ passthrough/hwenc/mjpeg/testpat |
 | POST | `/api/stop` | 停止 |
-| GET | `/api/status` | 运行状态、帧率、码率、CPU、最近日志 |
+| GET | `/api/status` | 运行状态、帧率、码率、CPU、摄像头可用性、最近日志 |
 | GET | `/video/mjpeg` | MJPEG 原生模式的 multipart 视频流 |
-| GET | `/hls/<path>` | MediaMTX HLS 同源代理（供 hls.js 使用） |
+| GET | `/hls/<path>` | MediaMTX HLS 同源代理（**转发查询串**，LL-HLS 阻塞式重载依赖 `?_HLS_msn=`） |
+| GET | `/static/<file>` | 静态资源（本地 hls.js） |
+
+## 部署
+
+```bash
+# 本地 → 板端
+bash scripts/dev.sh put camweb/camweb.py   /root/camweb.py
+bash scripts/dev.sh put camweb/index.html  /root/index.html
+bash scripts/dev.sh put camweb/static/hls.min.js /root/hls.min.js
+bash scripts/dev.sh put scripts/mediamtx.yml /root/mediamtx.yml
+# 板端安装
+bash /root/deploy-camweb.sh
+```
+
+## 自检
+
+```bash
+bash scripts/check-hls.sh          # HLS 主/子播放列表 + 分片下载 + LL-HLS 特征
+bash scripts/test-camweb-modes.sh  # 四模式端到端 + 连续切换防死锁
+bash scripts/diag-pipeline.sh      # 各解码/编码方案帧率对比
+```
 
 ## 已知事项
 
-* **本板 CPU 当前被限制在 600MHz**（PMIC 调压未接管，与 VPU 硬编无关），所以
-  `hwenc` 模式里 MJPEG 软件解码占 ~120% 单核；硬编本身是 VPU 干的，不受此影响。
-  若日后修复调频，该模式 CPU 会显著下降。
-* `hwenc` 的 fps 统计值是 ffmpeg 内部处理速率，实际输出以 HLS 探测到的 30/1 为准。
-* 摄像头节点默认 `/dev/video1`（同时支持 MJPG/H264 1920×1080@30），可在 `camweb.py` 顶部改 `CAM_DEV`。
+* **CPU 调频已修复**（2026-10-12）：根因是 RK808 regulator 驱动 `id_table` 漏了 `"rk808-regulator"`，
+  驱动不绑定 → `vdd_cpu_l` 未注册 → cpufreq 锁死 U-Boot 默认 600MHz。
+  新内核已部署并重启验证：`vdd_cpu_l` 电压 925mV/enabled，
+  小核可到 1416MHz、大核到 1800MHz（`schedutil`）。此前 12fps 的 MJPEG 软解现为 30fps。
+* 摄像头若在 USB 总线上掉线（`dmesg` 可见 `device descriptor read/64, error -110`），
+  `/dev/video*` 会消失，页面会明确提示「未检测到摄像头」，重新插拔即可。
+* LL-HLS 播放列表在流刚起步时会出现若干 `gap.mp4` 占位行（表示历史窗口尚无分片），
+  属正常现象，跑满 7 个分片后消失；做分片自检时需排除 `gap.mp4`。
+* 板端 `/usr/local/ffmpeg-rkmpp/bin/ffmpeg` 支持 `h264/hevc/mjpeg/…_rkmpp` 解码与
+  `h264/hevc/mjpeg_rkmpp` 编码；**没有 `rkrga` 滤镜**，所以缩放只能走 CPU。
+* RK3399 VEPU（H.264 编码器）实测产能约 45fps@1080p，**不是**当前瓶颈。

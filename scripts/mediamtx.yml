@@ -18,11 +18,14 @@ rtmpAddress: :1935
 
 hls: yes
 hlsAddress: :8888
+hlsVariant: lowLatency
+hlsPartDuration: 200ms
 hlsSegmentCount: 7
 hlsSegmentDuration: 1s
 
 webrtc: yes
 webrtcAddress: :8889
+webrtcAdditionalHosts: [10.0.0.18]
 webrtcICEServers: []
 
 srt: no

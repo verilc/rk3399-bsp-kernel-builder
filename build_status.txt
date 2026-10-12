@@ -1,0 +1,15 @@
+monitor started run=38227416071
+09:06:01 iter=1 status= conclusion=
+09:09:03 iter=2 status= conclusion=
+09:12:05 iter=3 status= conclusion=
+09:15:06 iter=4 status= conclusion=
+09:18:07 iter=5 status= conclusion=
+09:21:09 iter=6 status= conclusion=
+09:24:10 iter=7 status= conclusion=
+09:27:12 iter=8 status= conclusion=
+09:30:13 iter=9 status= conclusion=
+09:33:15 iter=10 status= conclusion=
+09:36:17 iter=11 status= conclusion=
+09:39:18 iter=12 status= conclusion=
+09:42:19 iter=13 status= conclusion=
+09:45:21 iter=14 status= conclusion=

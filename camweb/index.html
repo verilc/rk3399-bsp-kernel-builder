@@ -4,35 +4,39 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RK3399 摄像头硬编码 网页测试</title>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<!-- 本地托管，不依赖外网 CDN（离线环境必须） -->
+<script src="/static/hls.min.js"></script>
 <style>
   :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#c9d1d9;
           --acc:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,"PingFang SC",Microsoft YaHei,sans-serif;
          background:var(--bg); color:var(--fg); }
-  header { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
   header h1 { font-size:16px; margin:0; font-weight:600; }
   .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); box-shadow:0 0 8px var(--bad); }
   .dot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); }
   .badge { padding:2px 10px; border:1px solid var(--line); border-radius:999px; font-size:12px; }
   .badge.hw { color:var(--acc); border-color:var(--acc); }
+  .badge.ok { color:var(--ok); border-color:var(--ok); }
+  .badge.bad { color:var(--bad); border-color:var(--bad); }
   .spacer { flex:1; }
   main { display:flex; gap:16px; padding:16px; align-items:flex-start; }
   #stage { flex:1; min-width:0; }
   #videowrap { position:relative; background:#000; border:1px solid var(--line); border-radius:10px;
                aspect-ratio:16/9; overflow:hidden; display:flex; align-items:center; justify-content:center; }
   #view, #imgview { width:100%; height:100%; object-fit:contain; display:none; }
-  #hint { position:absolute; color:#8b949e; }
+  #hint { position:absolute; color:#8b949e; text-align:center; padding:0 20px; }
   .ov { position:absolute; padding:6px 10px; font-size:12px; background:rgba(0,0,0,.45); border-radius:8px; }
   .ov.tl { top:10px; left:10px; display:flex; gap:6px; }
   .ov.bl { bottom:10px; left:10px; }
+  .ov.tr { top:10px; right:10px; display:flex; gap:6px; }
   .chip { padding:1px 8px; border:1px solid var(--line); border-radius:6px; }
-  aside { width:320px; flex:none; display:flex; flex-direction:column; gap:14px; }
+  aside { width:340px; flex:none; display:flex; flex-direction:column; gap:14px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
   .card h2 { font-size:13px; margin:0 0 10px; color:#8b949e; font-weight:600; letter-spacing:.5px; }
-  .modes { display:flex; gap:8px; }
-  .modes button { flex:1; padding:8px 4px; border:1px solid var(--line); background:#0d1117; color:var(--fg);
+  .modes { display:flex; gap:6px; flex-wrap:wrap; }
+  .modes button { flex:1 1 46%; padding:8px 4px; border:1px solid var(--line); background:#0d1117; color:var(--fg);
                   border-radius:8px; cursor:pointer; font-size:12px; }
   .modes button.active { border-color:var(--acc); color:var(--acc); }
   .row { display:flex; align-items:center; gap:8px; margin:8px 0; }
@@ -47,11 +51,19 @@
   .btns { display:flex; gap:8px; margin-top:4px; }
   .btns button { flex:1; padding:9px; border-radius:8px; border:1px solid var(--line); cursor:pointer; font-size:13px; }
   #btnStart { background:var(--ok); border-color:var(--ok); color:#03210f; font-weight:600; }
+  #btnStart:disabled { background:#21262d; border-color:var(--line); color:#6e7681; cursor:not-allowed; }
   #btnStop { background:#21262d; color:var(--fg); }
-  .pipeline { font-size:11px; word-break:break-all; color:#8b949e; font-family:ui-monospace,Menlo,monospace; }
+  .pipeline { font-size:11px; word-break:break-all; color:#8b949e; font-family:ui-monospace,Menlo,monospace;
+              max-height:120px; overflow:auto; white-space:pre-wrap; }
   .note { font-size:11px; color:#8b949e; line-height:1.6; }
   .note b { color:var(--warn); }
+  .err { background:#3d1418; border:1px solid var(--bad); color:#ffb4ac; border-radius:8px;
+         padding:8px 10px; font-size:12px; word-break:break-all; margin-bottom:8px; }
   a { color:var(--acc); }
+  .camline { display:flex; align-items:center; gap:8px; }
+  .camline .dev { flex:1; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  .mini { padding:4px 10px; border:1px solid var(--line); background:#0d1117; color:var(--fg);
+          border-radius:6px; cursor:pointer; font-size:12px; }
 </style>
 </head>
 <body>
@@ -59,6 +71,7 @@
   <div class="dot" id="dot"></div>
   <h1>RK3399 摄像头采集 / 硬编码 网页测试</h1>
   <span class="badge hw">VPU h264_rkmpp</span>
+  <span class="badge" id="camBadge">摄像头检测中…</span>
   <div class="spacer"></div>
   <span class="badge" id="modeBadge">未启动</span>
 </header>
@@ -66,13 +79,16 @@
 <main>
   <section id="stage">
     <div id="videowrap">
-      <video id="view" playsinline></video>
+      <video id="view" playsinline muted></video>
       <img id="imgview" alt="mjpeg">
       <div id="hint">选择模式并点「开始」</div>
       <div class="ov tl">
         <span class="chip" id="chipCodec">—</span>
         <span class="chip" id="chipRes">—</span>
         <span class="chip" id="chipRate">—</span>
+      </div>
+      <div class="ov tr">
+        <span class="chip" id="chipPlay">播放器 —</span>
       </div>
     </div>
   </section>
@@ -84,14 +100,30 @@
         <button data-mode="passthrough" class="active">H.264 直通</button>
         <button data-mode="hwenc">H.264 硬编</button>
         <button data-mode="mjpeg">MJPEG 原生</button>
+        <button data-mode="testpat">测试图(免摄像头)</button>
       </div>
       <div class="note" id="modeNote" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>摄像头</h2>
+      <div class="camline">
+        <span class="dev" id="camDev">检测中…</span>
+        <button class="mini" id="btnRescan">重新检测</button>
+      </div>
+      <div class="note" id="camNote" style="margin-top:6px"></div>
     </div>
 
     <div class="card">
       <h2>参数</h2>
       <div class="row"><label>分辨率</label><select id="selRes"></select></div>
       <div class="row"><label>帧率</label><select id="selFps"></select></div>
+      <div class="row" id="rowDec"><label>解码</label>
+        <select id="selDec">
+          <option value="sw" selected>CPU 软解（最快 · 30fps）</option>
+          <option value="zero">零拷贝硬解 drm_prime</option>
+          <option value="hw">VPU 硬解 mjpeg_rkmpp</option>
+        </select></div>
       <div class="row" id="rowBr"><label>码率</label>
         <input type="range" id="rngBps" min="500" max="12000" step="500" value="4000">
         <span class="val" id="valBps">4000k</span></div>
@@ -103,7 +135,8 @@
     <div class="card">
       <h2>实时统计</h2>
       <div class="grid2">
-        <div class="cell"><div class="k">帧率</div><div class="v" id="stFps">—</div></div>
+        <div class="cell"><div class="k">实际帧率（剔除补帧）</div><div class="v" id="stReal">—</div></div>
+        <div class="cell"><div class="k">输出帧率（含补帧）</div><div class="v" id="stFps">—</div></div>
         <div class="cell"><div class="k">码率</div><div class="v" id="stKbps">—</div></div>
         <div class="cell"><div class="k">ffmpeg CPU</div><div class="v" id="stCpu">—</div></div>
         <div class="cell"><div class="k">运行时长</div><div class="v" id="stUp">—</div></div>
@@ -117,19 +150,23 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>Pipeline</h2>
-      <div class="pipeline" id="pipeline">—</div>
+    <div class="card" id="logCard" style="display:none">
+      <h2>错误 / 日志</h2>
+      <div class="err" id="errText"></div>
+      <div class="pipeline" id="pipeline"></div>
     </div>
 
     <div class="card">
       <h2>说明</h2>
       <div class="note">
-        • <b>H.264 直通</b>：摄像头自带 H.264 编码，仅转发，CPU≈0。<br>
-        • <b>H.264 硬编</b>：摄像头 MJPEG → VPU 硬件编码 h264_rkmpp（本页核心验证）。<br>
-        • <b>MJPEG 原生</b>：摄像头 MJPEG 原帧直出，零编码、最低延迟看原始画质。<br>
-        • 硬编/直通走 MediaMTX HLS，浏览器 hls.js 播放；MJPEG 走本服务 multipart。<br>
-        • 注：本板 CPU 当前被限制在 600MHz（PMIC 调压未接管），但不影响 VPU 硬件编解码速度。
+        • <b>H.264 直通</b>：摄像头自带 H.264 编码，仅转发，CPU≈5%，画质零损失。<br>
+        • <b>H.264 硬编</b>：摄像头 MJPEG → 解码 → VPU 硬编 h264_rkmpp（本页核心验证）。<br>
+        • <b>MJPEG 原生</b>：MJPEG 原帧直出，零编码、最低延迟看原始画质。<br>
+        • <b>测试图</b>：不接摄像头也能跑通「硬编→HLS→浏览器」整条链路。<br>
+        • 硬编/直通/测试图走 MediaMTX HLS（本地 hls.js 播放，<b>不依赖外网</b>）；MJPEG 走 multipart。<br>
+        • 「实际帧率」已剔除 ffmpeg 的补帧(dup)，才是真实处理能力；「输出帧率」是补帧后的流帧率。<br>
+        • 实测（CPU 调频已修复）：软解+硬编 <b>30fps</b>；零拷贝硬解 20fps；VPU 硬解 mjpeg_rkmpp 17fps。<br>
+        • 备选播放地址：WebRTC <span id="lnkWrtc"></span> ／ RTSP <span id="lnkRtsp"></span>
       </div>
     </div>
   </aside>
@@ -139,16 +176,19 @@
 (function () {
   "use strict";
   var mode = "passthrough";
-  var NATIVE = null;
+  var CAM = null;
   var hls = null;
   var timer = null;
+  var lastCapsKey = "";
+  var playerKind = "—";
 
   var $ = function (id) { return document.getElementById(id); };
 
   var MODE_NOTE = {
     passthrough: "摄像头本身输出 H.264，-c copy 直接转发，CPU 占用≈0，延迟最低。",
-    hwenc: "摄像头 MJPEG → ffmpeg h264_rkmpp（VPU 硬件编码）。可调节码率/GOP，验证硬编码。",
-    mjpeg: "摄像头 MJPEG 原帧经本服务 multipart 直出，零编码、最低延迟看原始画质。"
+    hwenc: "摄像头 MJPEG → 解码（软解/零拷贝/VPU 硬解）→ VPU 硬编 h264_rkmpp。可调码率、GOP、解码路径。",
+    mjpeg: "摄像头 MJPEG 原帧经本服务 multipart 直出，零编码、最低延迟看原始画质。",
+    testpat: "lavfi 测试图 → h264_rkmpp 硬编 → HLS。不需要摄像头，用来确认网页播放链路正常。"
   };
 
   function setDot(on) {
@@ -158,87 +198,168 @@
 
   function showModeNote() { $("modeNote").textContent = MODE_NOTE[mode] || ""; }
 
+  function setErr(msg) {
+    if (msg) { $("logCard").style.display = "block"; $("errText").textContent = msg; }
+    else { $("errText").textContent = ""; $("logCard").style.display = "none"; }
+  }
+
+  function updateCamUI() {
+    var avail = !!(CAM && CAM.available);
+    var b = $("camBadge");
+    if (avail) {
+      b.className = "badge ok";
+      b.textContent = "摄像头 " + CAM.device;
+      $("camDev").textContent = CAM.device + "  [" + (CAM.formats_list || []).join(",") + "]";
+      $("camNote").textContent = "已检测到 UVC 摄像头（支持 MJPG/H264）。";
+    } else {
+      b.className = "badge bad";
+      b.textContent = "无摄像头";
+      $("camDev").textContent = "未检测到";
+      $("camNote").textContent = "未发现支持 MJPG/H264 的 /dev/video*。请插好 USB 摄像头后点「重新检测」；"
+        + "若仍不行，重新插拔一次（此前 dmesg 有 UVC 枚举超时 -110）。";
+    }
+    $("btnStart").disabled = (!avail && mode !== "testpat");
+    $("hint").textContent = avail || mode === "testpat"
+      ? "选择模式并点「开始」" : "未检测到摄像头 —— 可先选「测试图(免摄像头)」验证播放链路";
+  }
+
   function fillCaps() {
-    fetch("/api/camera").then(function (r) { return r.json(); }).then(function (d) {
-      NATIVE = d;
-      var res = {}, fps = {};
-      (d.formats || []).forEach(function (f) {
-        if (["MJPG", "H264", "MJPEG"].indexOf(f.format) < 0) return;
-        f.sizes.forEach(function (s) {
-          var key = s.w + "x" + s.h;
-          res[key] = true;
-          (s.fps || []).forEach(function (v) { fps[Math.round(v)] = true; });
-        });
+    var res = {}, fps = {};
+    (CAM && CAM.formats || []).forEach(function (f) {
+      if (["MJPG", "H264", "MJPEG"].indexOf(f.format) < 0) return;
+      f.sizes.forEach(function (s) {
+        var key = s.w + "x" + s.h;
+        res[key] = true;
+        (s.fps || []).forEach(function (v) { fps[Math.round(v)] = true; });
       });
-      var rs = Object.keys(res).sort(function (a, b) {
-        var pa = a.split("x"), pb = b.split("x");
-        return pa[0] * pa[1] - pb[0] * pb[1];
-      });
-      $("selRes").innerHTML = rs.map(function (r) {
-        return '<option value="' + r + '"' + (r === "1920x1080" ? " selected" : "") + ">" + r + "</option>";
-      }).join("");
-      var fs = Object.keys(fps).map(Number).sort(function (a, b) { return a - b; });
-      $("selFps").innerHTML = fs.map(function (v) {
-        return '<option value="' + v + '"' + (v === 30 ? " selected" : "") + ">" + v + "</option>";
-      }).join("");
-    }).catch(function () { /* ignore */ });
+    });
+    var rs = Object.keys(res).sort(function (a, b) {
+      var pa = a.split("x"), pb = b.split("x");
+      return pa[0] * pa[1] - pb[0] * pb[1];
+    });
+    if (!rs.length) rs = ["1920x1080", "1280x720", "640x480"];
+    var fs = Object.keys(fps).map(Number).sort(function (a, b) { return a - b; });
+    if (!fs.length) fs = [30, 25, 15];
+
+    var key = rs.join(",") + "|" + fs.join(",");
+    if (key === lastCapsKey) return;
+    lastCapsKey = key;
+    $("selRes").innerHTML = rs.map(function (r) {
+      return '<option value="' + r + '"' + (r === "1920x1080" ? " selected" : "") + ">" + r + "</option>";
+    }).join("");
+    $("selFps").innerHTML = fs.map(function (v) {
+      return '<option value="' + v + '"' + (v === 30 ? " selected" : "") + ">" + v + "</option>";
+    }).join("");
   }
 
   function toggleControls() {
-    var hw = (mode === "hwenc");
+    var hw = (mode === "hwenc" || mode === "testpat");
     $("rowBr").style.opacity = hw ? "1" : "0.4";
     $("rowGop").style.opacity = hw ? "1" : "0.4";
     $("rngBps").disabled = !hw;
     $("inpGop").disabled = !hw;
+    // 解码路径只对硬编有意义
+    $("rowDec").style.display = (mode === "hwenc") ? "flex" : "none";
+  }
+
+  function refreshCam(force) {
+    return fetch("/api/camera" + (force ? "?force=1" : ""))
+      .then(function (r) { return r.json(); })
+      .then(function (d) { CAM = d; updateCamUI(); fillCaps(); return d; })
+      .catch(function () { CAM = { available: false }; updateCamUI(); });
   }
 
   function stopPlayback() {
-    if (hls) { hls.destroy(); hls = null; }
+    if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
     $("view").style.display = "none";
     $("imgview").style.display = "none";
-    $("view").pause();
+    try { $("view").pause(); } catch (e) {}
     $("imgview").src = "";
+    playerKind = "—";
+    $("chipPlay").textContent = "播放器 —";
+  }
+
+  function hlsUnavailable(msg) {
+    playerKind = "不可用";
+    $("chipPlay").textContent = "播放器 不可用";
+    setErr(msg + " 可直接打开板子的 WebRTC 页面：" + webrtcUrl() + " （无需任何 JS 库）");
+  }
+
+  function webrtcUrl() {
+    return location.protocol + "//" + location.hostname + ":8889/cam";
   }
 
   function startPlayback() {
     stopPlayback();
     $("hint").style.display = "none";
+    setErr("");
+
     if (mode === "mjpeg") {
+      playerKind = "原生 <img>";
+      $("chipPlay").textContent = "播放器 原生<img>";
       $("imgview").style.display = "block";
       $("imgview").src = "/video/mjpeg?t=" + Date.now();
-    } else {
-      var url = "/hls/cam/index.m3u8";
-      $("view").style.display = "block";
-      if (window.Hls && Hls.isSupported()) {
-        hls = new Hls({ liveSyncDuration: 1, maxLiveSyncPlaybackRate: 1.5, lowLatencyMode: true });
-        hls.loadSource(url);
-        hls.attachMedia($("view"));
-        hls.on(Hls.Events.ERROR, function (e, data) {
-          if (data.fatal) { hls.destroy(); hls = null; }
-        });
-      } else if ($("view").canPlayType("application/vnd.apple.mpegurl")) {
-        $("view").src = url;
-      }
-      $("view").play().catch(function () {});
+      return;
     }
+
+    var url = "/hls/cam/index.m3u8";
+    $("view").style.display = "block";
+
+    if (!window.Hls) {
+      return hlsUnavailable("hls.js 未加载（/static/hls.min.js 取不到）。");
+    }
+    if (!Hls.isSupported()) {
+      // Safari 等原生支持 HLS 的浏览器
+      if ($("view").canPlayType("application/vnd.apple.mpegurl")) {
+        playerKind = "原生 HLS";
+        $("chipPlay").textContent = "播放器 原生HLS";
+        $("view").src = url;
+        $("view").play().catch(function () {});
+      } else {
+        hlsUnavailable("当前浏览器既不支持 hls.js 也不支持原生 HLS。");
+      }
+      return;
+    }
+
+    playerKind = "hls.js";
+    $("chipPlay").textContent = "播放器 hls.js";
+    hls = new Hls({ lowLatencyMode: true, liveSyncDuration: 1, maxLiveSyncPlaybackRate: 1.5 });
+    hls.on(Hls.Events.ERROR, function (evt, data) {
+      var detail = (data && data.details) ? data.details : "unknown";
+      if (data && data.fatal) {
+        var why = "HLS 播放失败: " + detail + " / " + (data.type || "");
+        if (String(detail).indexOf("manifest") >= 0 || String(detail).indexOf("network") >= 0) {
+          why += "（可能流尚未产生，等 2~4 秒再点一次「开始」）";
+        }
+        setErr(why);
+      }
+    });
+    hls.loadSource(url);
+    hls.attachMedia($("view"));
+    $("view").play().catch(function () {});
   }
 
   function refresh() {
     fetch("/api/status").then(function (r) { return r.json(); }).then(function (s) {
       setDot(s.running);
+      $("stReal").textContent = s.real_fps != null ? s.real_fps.toFixed(1) : "—";
       $("stFps").textContent = s.fps != null ? s.fps.toFixed(1) : "—";
       $("stKbps").textContent = s.kbps != null ? Math.round(s.kbps) + "k" : "—";
       $("stCpu").textContent = s.cpu != null ? s.cpu + "%" : "—";
       $("stUp").textContent = s.uptime ? s.uptime + "s" : "—";
       if (s.running) {
         var p = s.params || {};
-        $("chipCodec").textContent = mode === "mjpeg" ? "MJPEG" : "H.264";
+        $("chipCodec").textContent = s.mode === "mjpeg" ? "MJPEG" : "H.264";
         $("chipRes").textContent = (p.width || "?") + "x" + (p.height || "?");
         $("chipRate").textContent = (p.bitrate || "?") + "k";
-        $("pipeline").textContent = s.log_tail && s.log_tail.length
-          ? s.log_tail[s.log_tail.length - 1] : "";
+        setErr("");
       } else {
         $("chipCodec").textContent = $("chipRes").textContent = $("chipRate").textContent = "—";
+        if (s.error) { setErr("上次运行失败: " + s.error); }
+      }
+      if (s.log_tail && s.log_tail.length) {
+        $("logCard").style.display = "block";
+        $("pipeline").textContent = s.log_tail.slice(-6).join("\n");
       }
     }).catch(function () {});
   }
@@ -251,29 +372,35 @@
       mode = b.getAttribute("data-mode");
       showModeNote();
       toggleControls();
+      updateCamUI();
     };
   });
   $("rngBps").oninput = function () { $("valBps").textContent = this.value + "k"; };
   $("inpGop").oninput = function () { $("valGop").textContent = this.value; };
+  $("btnRescan").onclick = function () { refreshCam(true); };
 
   $("btnStart").onclick = function () {
-    if (!NATIVE) { alert("摄像头能力未就绪，请稍候"); return; }
     var rp = $("selRes").value.split("x");
     var body = {
       mode: mode,
       width: +rp[0], height: +rp[1],
       fps: +$("selFps").value,
       bitrate: +$("rngBps").value,
-      gop: +$("inpGop").value
+      gop: +$("inpGop").value,
+      decode: $("selDec").value
     };
+    setErr("");
     fetch("/api/start", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body) })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (!d.ok) { alert("启动失败: " + d.msg); return; }
+        if (!d.ok) { setErr("启动失败: " + d.msg); setDot(false); refresh(); return; }
         startPlayback();
+        // HLS 需要等 MediaMTX 产生第一个切片，稍后重试一次以规避启动瞬间 404
+        if (mode !== "mjpeg") { setTimeout(function () { if (hls) { try { hls.startLoad(); } catch (e) {} } }, 2000); }
         refresh();
-      });
+      })
+      .catch(function (e) { setErr("请求失败: " + e); });
   };
 
   $("btnStop").onclick = function () {
@@ -286,11 +413,14 @@
   };
 
   // 初始化
+  $("lnkWrtc").innerHTML = '<a href="' + webrtcUrl() + '" target="_blank">:8889/cam</a>';
+  $("lnkRtsp").textContent = "rtsp://<板子IP>:8554/cam";
   showModeNote();
   toggleControls();
-  fillCaps();
+  refreshCam(false);
   refresh();
   timer = setInterval(refresh, 1000);
+  setInterval(function () { refreshCam(false); }, 3000);
 })();
 </script>
 </body>
