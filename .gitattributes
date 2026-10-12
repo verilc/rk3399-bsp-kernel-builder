@@ -1,0 +1,20 @@
+# 强制所有文本文件以 LF 存储与检出。
+# 原因：Windows 上 core.autocrlf 默认可能开启，会把 shell 脚本转成 CRLF，
+# 而 CRLF 的 .sh 在 Linux/GitHub Actions 上会报 "bad interpreter" 直接失败。
+* text=auto eol=lf
+
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.sh       text eol=lf
+*.dts      text eol=lf
+*.dtsi     text eol=lf
+*.fragment text eol=lf
+*.config   text eol=lf
+*.md       text eol=lf
+
+# 二进制文件不做转换
+*.zst  binary
+*.xz   binary
+*.gz   binary
+*.jpg  binary
+*.png  binary

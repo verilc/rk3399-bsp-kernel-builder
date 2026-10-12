@@ -1,0 +1,29 @@
+# ============================================================================
+# rockchip-minimal.fragment  （保持 keep_minimal = true 时生效）
+#
+# 目的：关掉与「USB 摄像头 → 硬编 H.264 → 推流」这条链路无关的重型子系统，
+#       缩短首次编译时间。
+#
+# 已核对：下面这些符号在 rockchip_linux_defconfig 里**全部是 =y**，
+#         所以这个片段是真实生效的，不是空操作。
+#
+# 代价：
+#   - 板载音频（RT5640 / I2S）不可用 → 无头推流场景不影响
+#   - MIPI/CSI 摄像头、HDMI 输入、机内 ISP 不可用 → 你用 USB(UVC) 摄像头，不影响
+#
+# 不影响：启动、eMMC/SD、千兆以太网、USB、UVC 摄像头、MPP 硬编解码、HDMI 显示输出
+#
+# 如果确认新内核能点亮、想要完整功能，用 keep_minimal = false 重新编一次即可。
+# ============================================================================
+
+# ---- Rockchip 视频输入链路（RK35xx 那套 ISP，RK3399 无头场景用不上）----
+# CONFIG_VIDEO_ROCKCHIP_ISP is not set
+# CONFIG_VIDEO_ROCKCHIP_ISPP is not set
+# CONFIG_VIDEO_ROCKCHIP_AIISP is not set
+# CONFIG_VIDEO_ROCKCHIP_RKISP1 is not set
+# CONFIG_VIDEO_ROCKCHIP_CIF is not set
+# CONFIG_VIDEO_ROCKCHIP_HDMIRX is not set
+# CONFIG_VIDEO_ROCKCHIP_VPSS is not set
+
+# ---- 音频子系统（ALSA SoC 框架 + 板载 codec）----
+# CONFIG_SND_SOC is not set

@@ -1,0 +1,19 @@
+# GitHub 凭据（绝不提交）
+.gh_token
+.gh_token.*
+*.token
+
+# 编译与产物
+kbuild/
+dist/
+*.tar.zst
+*.tar.xz
+*.tar.gz
+*.sha256
+out/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

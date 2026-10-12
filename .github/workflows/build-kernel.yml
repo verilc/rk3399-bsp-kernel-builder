@@ -1,0 +1,310 @@
+# ==========================================================================
+# Build Rockchip BSP kernel for TN3399_V3 (RK3399) with MPP hardware encoding
+#
+# 为什么要在 GitHub 上编：
+#   RK3399 要拿到 H.264 硬编码，必须用 Rockchip 厂商(BSP)内核 + MPP 驱动。
+#   Armbian / ophub 仓库里已经没有 rk3399 的 BSP 内核了，只能自己编。
+#   本仓库用 GitHub 免费的 arm64 runner 原生编译（公开仓库免费、不限分钟数）。
+#
+# 产出：Release 资产 rk3399-bsp-<版本>-tn3399.tar.zst
+#   内含 kernel/Image、kernel/rk3399-tn3399-v3.dtb、modules/、config、sha256
+# ==========================================================================
+name: Build Rockchip BSP kernel (TN3399_V3 / RK3399 + MPP)
+
+on:
+  # 手动触发（推荐）：Actions 页面点 "Run workflow"
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "BSP 内核仓库 (owner/name)"
+        required: true
+        default: "rockchip-linux/kernel"
+      kernel_branch:
+        description: "BSP 内核分支"
+        required: true
+        default: "develop-6.1"
+        type: choice
+        options:
+          - develop-6.1
+          - develop-5.10
+          - develop-4.4
+      localversion:
+        description: "内核 LOCALVERSION 后缀"
+        required: true
+        default: "-rkbsp"
+      make_jobs:
+        description: "并行编译任务数（留空 = 自动）"
+        required: false
+        default: ""
+      keep_minimal:
+        description: "精简配置（关掉 ISP/音频等无关子系统，加快编译）"
+        required: true
+        default: true
+        type: boolean
+
+  # 注意：这里刻意没有配 push 触发。
+  # 一次编译要 1~3 小时，避免误提交就自动烧掉一次额度。
+  # 只在 Actions 页面点 "Run workflow"（或用 API 触发）时才开跑。
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # arm64 原生编译，省掉交叉工具链的麻烦
+    # 注意：arm64 runner 仅在【公开仓库】可用，私有仓库会直接失败
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 355
+
+    steps:
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1. 腾磁盘空间并选定编译目录
+      # ------------------------------------------------------------------
+      - name: Free up disk space and pick build root
+        id: disk
+        run: |
+          echo "=== 清理前 ==="; df -hT / /mnt 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift \
+                      /opt/hostedtoolcache /usr/local/lib/node_modules 2>/dev/null || true
+          if [ -n "${AGENT_TOOLSDIRECTORY:-}" ]; then sudo rm -rf "${AGENT_TOOLSDIRECTORY}" 2>/dev/null || true; fi
+          sudo docker image prune -a -f 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile /mnt/swapfile 2>/dev/null || true
+          sudo apt-get clean
+          echo "=== 清理后 ==="; df -hT / /mnt 2>/dev/null || true
+
+          ROOT_AVAIL=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          MNT_AVAIL=0
+          if mountpoint -q /mnt 2>/dev/null; then
+            MNT_AVAIL=$(df --output=avail -BG /mnt | tail -1 | tr -dc '0-9')
+          fi
+          echo "root=${ROOT_AVAIL}G  mnt=${MNT_AVAIL}G"
+          if [ "${MNT_AVAIL:-0}" -gt "${ROOT_AVAIL:-0}" ]; then
+            BUILDROOT=/mnt/kbuild
+          else
+            BUILDROOT="${GITHUB_WORKSPACE}/kbuild"
+          fi
+          sudo mkdir -p "${BUILDROOT}"
+          sudo chown -R "$(id -u):$(id -g)" "${BUILDROOT}"
+          echo "buildroot=${BUILDROOT}" >> "${GITHUB_OUTPUT}"
+          echo "选用编译目录: ${BUILDROOT}（可用 $(df -BG --output=avail "${BUILDROOT}" | tail -1 | tr -dc '0-9')G）"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get -y update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            rsync kmod cpio device-tree-compiler xz-utils zstd \
+            ccache git curl ca-certificates
+
+      # ------------------------------------------------------------------
+      # 2. 解析参数（兼容 push 触发时没有 inputs 的情况）
+      # ------------------------------------------------------------------
+      - name: Resolve build parameters
+        id: p
+        env:
+          IN_REPO: ${{ github.event.inputs.kernel_repo }}
+          IN_BRANCH: ${{ github.event.inputs.kernel_branch }}
+          IN_LV: ${{ github.event.inputs.localversion }}
+          IN_JOBS: ${{ github.event.inputs.make_jobs }}
+          IN_MINIMAL: ${{ github.event.inputs.keep_minimal }}
+        run: |
+          REPO="${IN_REPO:-rockchip-linux/kernel}"
+          BRANCH="${IN_BRANCH:-develop-6.1}"
+          LV="${IN_LV:--rkbsp}"
+          JOBS="${IN_JOBS:-$(nproc)}"
+          MINIMAL="${IN_MINIMAL:-true}"
+          {
+            echo "repo=${REPO}"
+            echo "branch=${BRANCH}"
+            echo "lv=${LV}"
+            echo "jobs=${JOBS}"
+            echo "minimal=${MINIMAL}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "repo=${REPO}  branch=${BRANCH}  localversion=${LV}  jobs=${JOBS}  minimal=${MINIMAL}"
+
+      # ------------------------------------------------------------------
+      # 3. 拉取 BSP 内核源码（浅克隆）
+      # ------------------------------------------------------------------
+      - name: Clone BSP kernel source
+        run: |
+          set -e
+          cd "${{ steps.disk.outputs.buildroot }}"
+          git clone --depth=1 --branch "${{ steps.p.outputs.branch }}" \
+            "https://github.com/${{ steps.p.outputs.repo }}.git" kernel
+          cd kernel
+          echo "=== 内核源码 HEAD ==="
+          git log -1 --format='%H %cd %s' --date=short
+          echo "KSRC_HASH=$(git rev-parse HEAD)" >> "${GITHUB_ENV}"
+          [ -f arch/arm64/configs/rockchip_linux_defconfig ] \
+            || { echo "::error::找不到 rockchip_linux_defconfig"; exit 1; }
+          echo "defconfig 存在 OK"
+          [ -d drivers/video/rockchip/mpp ] \
+            || { echo "::error::该分支没有 drivers/video/rockchip/mpp，无法获得硬编码"; exit 1; }
+          echo "MPP 驱动目录存在 OK"
+
+      # ------------------------------------------------------------------
+      # 4. 安装 TN3399_V3 设备树
+      # ------------------------------------------------------------------
+      - name: Install TN3399_V3 device tree
+        run: |
+          set -e
+          cd "${{ steps.disk.outputs.buildroot }}/kernel"
+          DTSDIR=arch/arm64/boot/dts/rockchip
+          cp "${GITHUB_WORKSPACE}/dts/rk3399-tn3399-v3.dts" "${DTSDIR}/"
+          grep -q "rk3399-tn3399-v3.dtb" "${DTSDIR}/Makefile" \
+            || echo 'dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3399-tn3399-v3.dtb' >> "${DTSDIR}/Makefile"
+          echo "=== Makefile 中的 tn3399 条目 ==="
+          grep -n "tn3399" "${DTSDIR}/Makefile"
+
+      # ------------------------------------------------------------------
+      # 5. 配置内核
+      # ------------------------------------------------------------------
+      - name: Configure kernel
+        run: |
+          set -e
+          cd "${{ steps.disk.outputs.buildroot }}/kernel"
+          make ARCH=arm64 rockchip_linux_defconfig
+
+          # 合并配置片段（补齐 Docker / WiFi / overlayfs 等）
+          # merge_config.sh 会以当前 .config 为基底，把片段叠加进去
+          ./scripts/kconfig/merge_config.sh -m \
+            "${GITHUB_WORKSPACE}/config/rockchip-armbian.fragment"
+          if [ "${{ steps.p.outputs.minimal }}" = "true" ]; then
+            ./scripts/kconfig/merge_config.sh -m \
+              "${GITHUB_WORKSPACE}/config/rockchip-minimal.fragment"
+          fi
+          make ARCH=arm64 olddefconfig
+
+          # 关闭模块签名，避免自编模块被内核拒载
+          ./scripts/config --file .config --disable MODULE_SIG || true
+          ./scripts/config --file .config --disable MODULE_SIG_ALL || true
+          ./scripts/config --file .config --set-str SYSTEM_TRUSTED_KEYS "" || true
+          ./scripts/config --file .config --set-str SYSTEM_REVOCATION_KEYS "" || true
+          make ARCH=arm64 olddefconfig
+
+          KREL=$(make -s ARCH=arm64 LOCALVERSION="${{ steps.p.outputs.lv }}" kernelrelease | tail -n1)
+          echo "KERNEL_RELEASE=${KREL}" >> "${GITHUB_ENV}"
+          echo "内核版本: ${KREL}"
+
+          echo "=== 关键配置自检 ==="
+          FAIL=0
+          for opt in CONFIG_ROCKCHIP_MPP_SERVICE=y CONFIG_ROCKCHIP_MPP_VEPU2=y \
+                     CONFIG_ROCKCHIP_MPP_VDPU2=y CONFIG_ROCKCHIP_MPP_RKVDEC=y \
+                     CONFIG_ROCKCHIP_IOMMU=y CONFIG_DMABUF_HEAPS_ROCKCHIP=y \
+                     CONFIG_USB_VIDEO_CLASS=y CONFIG_EXT4_FS=y CONFIG_BLK_DEV_INITRD=y; do
+            if grep -qx "${opt}" .config; then echo "  [OK]   ${opt}"; else echo "  [失败] ${opt}"; FAIL=1; fi
+          done
+          for opt in CONFIG_OVERLAY_FS CONFIG_BRCMFMAC CONFIG_VETH CONFIG_NF_CONNTRACK; do
+            if grep -qE "^${opt}=(y|m)" .config; then echo "  [OK]   ${opt}"; else echo "  [警告] ${opt} 未启用"; fi
+          done
+          if grep -qx "CONFIG_MODULE_SIG=y" .config; then
+            echo "  [失败] 模块签名未关闭"; FAIL=1
+          else
+            echo "  [OK]   模块签名已关闭"
+          fi
+          [ "${FAIL}" = "0" ] || { echo "::error::关键内核配置检查失败"; exit 1; }
+
+      # ------------------------------------------------------------------
+      # 6. 编译（带 ccache，重跑可大幅加速）
+      # ------------------------------------------------------------------
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.disk.outputs.buildroot }}/ccache
+          key: ccache-${{ steps.p.outputs.branch }}-${{ env.KSRC_HASH }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ steps.p.outputs.branch }}-${{ env.KSRC_HASH }}-
+            ccache-${{ steps.p.outputs.branch }}-
+
+      - name: Build Image, DTBs and modules
+        run: |
+          set -e
+          cd "${{ steps.disk.outputs.buildroot }}/kernel"
+          export CCACHE_DIR="${{ steps.disk.outputs.buildroot }}/ccache"
+          ccache --max-size=3G || true
+          ccache -z || true
+          echo "开始编译 jobs=${{ steps.p.outputs.jobs }}  时间: $(date -u)"
+          make ARCH=arm64 LOCALVERSION="${{ steps.p.outputs.lv }}" \
+               -j"${{ steps.p.outputs.jobs }}" CC="ccache gcc" \
+               Image dtbs modules
+          echo "编译结束  时间: $(date -u)"
+          ccache -s || true
+
+      # ------------------------------------------------------------------
+      # 7. 打包产物
+      # ------------------------------------------------------------------
+      - name: Stage and package artifacts
+        run: |
+          set -e
+          BR="${{ steps.disk.outputs.buildroot }}"
+          cd "${BR}/kernel"
+          OUT="${BR}/out"
+          rm -rf "${OUT}"; mkdir -p "${OUT}/modules"
+
+          make ARCH=arm64 LOCALVERSION="${{ steps.p.outputs.lv }}" \
+               INSTALL_MOD_PATH="${OUT}/modules" INSTALL_MOD_STRIP=1 \
+               modules_install
+          depmod -b "${OUT}/modules" "${KERNEL_RELEASE}" 2>/dev/null || true
+
+          install -Dm644 arch/arm64/boot/Image                                "${OUT}/kernel/Image"
+          install -Dm644 arch/arm64/boot/dts/rockchip/rk3399-tn3399-v3.dtb    "${OUT}/kernel/rk3399-tn3399-v3.dtb"
+          install -Dm644 .config                                             "${OUT}/kernel/config-${KERNEL_RELEASE}"
+          install -Dm644 System.map                                          "${OUT}/kernel/System.map-${KERNEL_RELEASE}"
+
+          {
+            echo "kernel_release: ${KERNEL_RELEASE}"
+            echo "kernel_repo:    ${{ steps.p.outputs.repo }}"
+            echo "kernel_branch:  ${{ steps.p.outputs.branch }}"
+            echo "source_commit:  ${KSRC_HASH}"
+            echo "build_time_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner:         $(uname -m) / $(nproc) cores"
+          } > "${OUT}/kernel/BUILD-INFO.txt"
+
+          NAME="rk3399-bsp-${KERNEL_RELEASE}-tn3399.tar.zst"
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          cd "${OUT}"
+          tar --zstd -cf "${GITHUB_WORKSPACE}/dist/${NAME}" kernel modules
+          cd "${GITHUB_WORKSPACE}/dist"
+          sha256sum "${NAME}" > "${NAME}.sha256"
+
+          echo "ARTIFACT_PATH=${GITHUB_WORKSPACE}/dist/${NAME}" >> "${GITHUB_ENV}"
+          echo "ARTIFACT_NAME=${NAME}" >> "${GITHUB_ENV}"
+          echo "=== 产物 ==="
+          ls -lh "${GITHUB_WORKSPACE}/dist/"
+          echo "=== 压缩包顶层内容 ==="
+          tar --zstd -tf "${GITHUB_WORKSPACE}/dist/${NAME}" | head -15
+          du -sh "${OUT}/modules"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3399-bsp-kernel-${{ env.KERNEL_RELEASE }}
+          path: |
+            dist/${{ env.ARTIFACT_NAME }}
+            dist/${{ env.ARTIFACT_NAME }}.sha256
+          retention-days: 14
+
+      # 同时发布到 Release：设备上可直接用 curl 匿名下载
+      - name: Publish to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.p.outputs.branch }}
+          LOCALVER: ${{ steps.p.outputs.lv }}
+        run: |
+          set -e
+          TAG="bsp-${KERNEL_RELEASE}"
+          NOTES="${GITHUB_WORKSPACE}/dist/RELEASE-NOTES.md"
+          printf 'MPP 硬件编解码内核（RK3399 / VEPU2）\n\n- 内核分支: %s\n- 源码 commit: %s\n- 含 H.264 硬编码 (VEPU2)、硬解码 (VDPU2 / RKVDEC)\n- 设备树: rk3399-tn3399-v3.dtb\n- 内核版本后缀: %s\n- 构建时间(UTC): %s\n' \
+            "${BRANCH}" "${KSRC_HASH}" "${LOCALVER}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${NOTES}"
+          gh release create "${TAG}" \
+            "${ARTIFACT_PATH}" "${ARTIFACT_PATH}.sha256" \
+            --title "Rockchip BSP kernel ${KERNEL_RELEASE} (TN3399_V3 / RK3399)" \
+            --notes-file "${NOTES}" \
+            --latest=false \
+          || gh release upload "${TAG}" "${ARTIFACT_PATH}" "${ARTIFACT_PATH}.sha256" --clobber
+          echo "下载地址: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ARTIFACT_NAME}"
