@@ -125,10 +125,47 @@ bash scripts/diag-pipeline.sh      # 各解码/编码方案帧率对比
 
 ## 已知事项
 
+### 2026-10-12 晚：直通黑屏根因（务必记住）
+
+**`-fflags +genpts` 会让直通流打挂 MediaMTX 的 HLS 切片器**：
+
+```
+[HLS] [muxer cam] destroyed: muxer error: unable to extract DTS: too many reordered frames (14)
+```
+
+切片器一崩，HLS 播放列表 404，浏览器黑屏（但 ffmpeg 侧统计照常显示，极具迷惑性）。
+**修复：直通/所有模式都不要再加 `+genpts`**（`HDR` 里已移除并留了注释）。
+实测去掉后 muxer 稳定，`too many reordered` 不再出现。
+（备选方案 `setts=ts=N*3003` 强制等间隔时间戳、`-use_wallclock_as_timestamps 1` 也有效。）
+
+**HLS 播放链路优先级**：浏览器 → MediaMTX `:8888`（直连，MediaMTX 原生回显 Origin 的 CORS 头）；
+直连失败自动切同源代理 `/hls/`。代理必须"永不裸崩"——曾因 `except` 分支用了未 import 的
+`sys`，上游 404 时异常处理器自己 `NameError`，连接被裸关闭 → 浏览器 `ERR_EMPTY_RESPONSE`
+→ hls.js 致命网络错误 → 黑屏。**页面若改过，记得强刷（Ctrl+F5），Chrome 会缓存旧 HTML。**
+
+**低延迟播放**：默认走 **WebRTC（MediaMTX WHEP `:8889/cam/whep`）**，实测端到端
+jitter buffer 延迟 **~22ms**，HLS(LL-HLS) 约 1.5s。
+
+### 码控
+
+实测（1920x1080@30，同一 8s 摄像头源离线编码）：
+
+| 码控 | 结果 |
+|---|---|
+| CBR 4000k | q≈30~35，偏软（默认 4M 对 1080p 明显不够） |
+| CBR 8000k | q≈28 |
+| **CQP 23** | **q≈23，明显更清晰**，吞吐相同（37~38fps） |
+
+所以页面默认 **CQP qp=24**（质量优先），需要恒定码率时切 CBR（默认提到 8000k）。
+
+### 其它
+
 * **CPU 调频已修复**（2026-10-12）：根因是 RK808 regulator 驱动 `id_table` 漏了 `"rk808-regulator"`，
   驱动不绑定 → `vdd_cpu_l` 未注册 → cpufreq 锁死 U-Boot 默认 600MHz。
   新内核已部署并重启验证：`vdd_cpu_l` 电压 925mV/enabled，
   小核可到 1416MHz、大核到 1800MHz（`schedutil`）。此前 12fps 的 MJPEG 软解现为 30fps。
+* 硬编 sw 路径**不再指定 `-pix_fmt nv12`**：ffmpeg 直接把 `yuvj420p` 喂给 h264_rkmpp
+  （它支持），省掉一次 swscale 全帧拷贝。
 * 摄像头若在 USB 总线上掉线（`dmesg` 可见 `device descriptor read/64, error -110`），
   `/dev/video*` 会消失，页面会明确提示「未检测到摄像头」，重新插拔即可。
 * LL-HLS 播放列表在流刚起步时会出现若干 `gap.mp4` 占位行（表示历史窗口尚无分片），
@@ -136,3 +173,5 @@ bash scripts/diag-pipeline.sh      # 各解码/编码方案帧率对比
 * 板端 `/usr/local/ffmpeg-rkmpp/bin/ffmpeg` 支持 `h264/hevc/mjpeg/…_rkmpp` 解码与
   `h264/hevc/mjpeg_rkmpp` 编码；**没有 `rkrga` 滤镜**，所以缩放只能走 CPU。
 * RK3399 VEPU（H.264 编码器）实测产能约 45fps@1080p，**不是**当前瓶颈。
+* 浏览器侧验收用 `scripts/probe-page.mjs`（本机无头 Chrome + CDP，自动点「开始」，
+  抓 hls.js/控制台报错、`<video>` 状态与截图），比 curl 自检更接近真实体验。

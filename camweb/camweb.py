@@ -23,6 +23,7 @@ RK3399 摄像头采集 / 编解码 网页测试服务（纯标准库，无需 pi
 """
 import os
 import re
+import sys
 import glob
 import json
 import time
@@ -32,6 +33,7 @@ import collections
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import urllib.request
+import urllib.error
 
 # ----------------------------- 配置 -----------------------------
 FFMPEG = "/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
@@ -182,7 +184,11 @@ def default_native(formats):
 
 # ----------------------------- 管线构造 -----------------------------
 HDR = ["-hide_banner", "-loglevel", "info",
-       "-fflags", "nobuffer", "-flags", "low_delay", "-fflags", "+genpts"]
+       "-fflags", "nobuffer", "-flags", "low_delay"]
+# 注意：不要加 -fflags +genpts！实测它会让直通流的 PTS/DTS 关系变得让
+# MediaMTX 的 HLS 切片器直接报错退出：
+#   "muxer error: unable to extract DTS: too many reordered frames (14)"
+# 切片器一崩，HLS 播放列表 404，浏览器就黑屏 —— 这正是"直通不显示画面"的根因。
 
 # 硬编时可选的解码路径（实测 1920x1080@30 真实帧率，见 README）
 HWENC_DECODES = ("sw", "zero", "hw")
@@ -195,10 +201,26 @@ def _in_opts(fmt, w, h, fps, dev):
             "-video_size", f"{w}x{h}", "-framerate", str(fps), "-i", dev]
 
 
-def _enc_opts(br, gop, pix_fmt=True):
-    o = ["-c:v", "h264_rkmpp", "-rc_mode", "CBR",
-         "-b:v", f"{br}k", "-maxrate", f"{br}k", "-bufsize", f"{br*2}k",
-         "-g", str(gop), "-bf", "0"]
+def _enc_opts(p, gop, pix_fmt=True):
+    """h264_rkmpp 编码参数。
+
+    实测（1920x1080@30，同一 8s 摄像头源离线编码）：
+      CBR 8000k -> q≈28（偏软）
+      CQP  23   -> q≈23（明显更清晰），吞吐相同
+    所以默认走 CQP 质量优先；需要恒定码率时选 CBR。
+    """
+    rc = (p.get("rc") or "cqp").lower()
+    if rc not in ("cqp", "cbr"):
+        rc = "cqp"
+    o = ["-c:v", "h264_rkmpp", "-g", str(gop), "-bf", "0"]
+    if rc == "cqp":
+        qp = int(p.get("qp") or 24)
+        qp = max(16, min(40, qp))
+        o += ["-rc_mode", "CQP", "-qp_init", str(qp)]
+    else:
+        br = int(p.get("bitrate") or 8000)
+        o += ["-rc_mode", "CBR",
+              "-b:v", f"{br}k", "-maxrate", f"{br}k", "-bufsize", f"{br*2}k"]
     if pix_fmt:
         o += ["-pix_fmt", "nv12"]
     return o
@@ -207,14 +229,13 @@ def _enc_opts(br, gop, pix_fmt=True):
 def build_cmd(mode, p, variant=None):
     w, h, fps = int(p["width"]), int(p["height"]), int(p["fps"])
     dev = p.get("device", CAM_DEV_HINT)
-    br = int(p.get("bitrate", 4000))
     gop = int(p.get("gop", 30))
 
     if mode == "testpat":
         # 无摄像头：lavfi 测试图 -> VPU 硬编 -> MediaMTX（用于验证网页播放链路本身）
         return [FFMPEG, "-hide_banner", "-loglevel", "info", "-re",
                 "-f", "lavfi", "-i", f"testsrc2=size={w}x{h}:rate={fps}",
-                *_enc_opts(br, gop),
+                *_enc_opts(p, gop),
                 "-f", "rtsp", f"{MTX_RTSP}/{STREAM_PATH}"]
 
     if mode == "hwenc":
@@ -223,20 +244,22 @@ def build_cmd(mode, p, variant=None):
             return [FFMPEG, *HDR,
                     "-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime",
                     *_in_opts("mjpeg", w, h, fps, dev),
-                    *_enc_opts(br, gop, pix_fmt=False),
+                    *_enc_opts(p, gop, pix_fmt=False),
                     "-f", "rtsp", f"{MTX_RTSP}/{STREAM_PATH}"]
         if variant == "hw":
             # VPU 硬解 MJPEG（mjpeg_rkmpp）后再硬编
             return [FFMPEG, *HDR, "-c:v", "mjpeg_rkmpp",
                     *_in_opts("mjpeg", w, h, fps, dev),
-                    *_enc_opts(br, gop),
+                    *_enc_opts(p, gop),
                     "-f", "rtsp", f"{MTX_RTSP}/{STREAM_PATH}"]
         # 默认 sw：CPU 软解 MJPEG + VPU 硬编。
         # CPU 调频修复后这是最快路径（1920x1080@30 可跑满 30fps），
         # 因为 RK3399 的 MJPEG 硬解本身只有 ~17-20fps。
+        # 不指定 -pix_fmt：ffmpeg 会直接把 yuvj420p 喂给 rkmpp（它支持），
+        # 省掉一次 swscale 全帧拷贝（实测吞吐更高，色域/量程信息也保留得更完整）。
         return [FFMPEG, *HDR,
                 *_in_opts("mjpeg", w, h, fps, dev),
-                *_enc_opts(br, gop),
+                *_enc_opts(p, gop, pix_fmt=False),
                 "-f", "rtsp", f"{MTX_RTSP}/{STREAM_PATH}"]
 
     if mode == "passthrough":
@@ -488,10 +511,18 @@ def cpu_sampler(proc):
 
 # ----------------------------- HLS 代理 -----------------------------
 def proxy_hls(path, handler):
+    """把 MediaMTX 的 HLS 转发给浏览器（同源，避开 CORS）。
+
+    现在页面默认**直连** MediaMTX（它原生回显 Origin 的 CORS 头），
+    这个代理只是直连不可用时的兜底，所以必须做到"永不裸崩"：
+    之前这里 except 分支里用了未 import 的 sys，一旦上游 404
+    （流刚起步、切片器重建，很常见），异常处理器自己抛 NameError，
+    连接被裸关闭 -> 浏览器收到 ERR_EMPTY_RESPONSE -> hls.js 致命错误 -> 黑屏。
+    """
     url = MTX_HLS.rstrip("/") + "/" + path
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "camweb"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             ctype = resp.headers.get("Content-Type", "application/octet-stream")
             data = resp.read()
         handler.send_response(200)
@@ -500,11 +531,32 @@ def proxy_hls(path, handler):
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
         handler.wfile.write(data)
+    except urllib.error.HTTPError as e:
+        # 上游 4xx/5xx 原样透传（LL-HLS 阻塞重载失败时 hls.js 自己会重试）
+        body = b""
+        try:
+            body = e.read()
+        except Exception:
+            pass
+        try:
+            handler.send_response(e.code)
+            handler.send_header("Content-Type",
+                                e.headers.get("Content-Type", "text/plain"))
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            if body:
+                handler.wfile.write(body)
+        except Exception:
+            pass
     except Exception as e:  # noqa
         # send_error 的 message 会写进 HTTP 状态行，只允许 latin-1，
         # 中文会抛 UnicodeEncodeError 并丢掉连接 —— 所以这里一律用 ASCII
         sys.stderr.write("HLS proxy failed: %r\n" % (e,))
-        handler.send_error(502, "HLS proxy failed")
+        try:
+            handler.send_error(502, "HLS proxy failed")
+        except Exception:
+            pass
 
 
 MIME = {

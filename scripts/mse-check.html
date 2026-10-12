@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>MSE codec support</title></head>
+<body><pre id="o">pending</pre>
+<script>
+var list = ["avc1.640033","avc1.640028","avc1.64001F","avc1.42E01E","avc1.64002A","avc1.4D401F"];
+var out = [];
+out.push("MediaSource=" + (typeof MediaSource !== "undefined"));
+list.forEach(function (c) {
+  var t = 'video/mp4; codecs="' + c + '"';
+  var ok = false;
+  try { ok = MediaSource.isTypeSupported(t); } catch (e) { ok = "ERR:" + e.message; }
+  out.push(c + " -> " + ok);
+});
+document.getElementById("o").textContent = out.join("\n");
+</script>
+</body></html>
