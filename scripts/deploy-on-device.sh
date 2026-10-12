@@ -1,19 +1,27 @@
 #!/bin/bash
 # ============================================================================
-# 在 TN3399_V3 (RK3399) 设备上安装新编译出来的 BSP 内核
+# 在 TN3399_V3 (RK3399) 设备上安装新编译出来的 BSP 内核   [v2 - 适配符号链接]
 #
 # 用法（在设备上以 root 运行）：
 #   bash deploy-on-device.sh /root/rk3399-bsp-6.1.xxx-rkbsp-tn3399.tar.zst
 #
+# 本机 /boot 的实际布局（Armbian 标准）：
+#   Image   -> vmlinuz-<ver>        （符号链接）
+#   uInitrd -> uInitrd-<ver>        （符号链接，内容是 mkimage 包装的 uImage）
+#   因此本脚本【不覆盖旧内核文件】，而是新建 <新版本> 文件后重指符号链接：
+#   回滚只需把链接指回去，旧内核文件始终完好。
+#
 # 做的事：
 #   1) 校验 sha256
-#   2) 备份当前 /boot 引导文件到 /root/kernel-rollback/<时间戳>/
-#   3) 安装模块到 /lib/modules/<新版本>   （旧内核模块保持不动，便于回滚）
-#   4) 替换设备树 rk3399-tn3399-v3.dtb
-#   5) 用新模块重新生成 /boot/uInitrd
-#   6) 最后一步才替换 /boot/Image
+#   2) 解包
+#   3) 备份引导环境（含符号链接指向记录）到 /root/kernel-rollback/<时间戳>/
+#   4) 安装模块到 /lib/modules/<新版本> 并 depmod（旧模块目录不动）
+#   5) 替换设备树 rk3399-tn3399-v3.dtb（旧文件备份为 .orig）
+#   6) 用新模块生成 initramfs，并用 mkimage 打成 uImage（uInitrd-<新版本>）
+#   7) 安装 vmlinuz-<新版本> / System.map / config，最后重指 Image 与 uInitrd 链接
 #
-# 回滚：bash rollback.sh
+# 本脚本【不会自动重启】，装完由你检查后再 reboot。
+# 回滚：bash rollback.sh --yes
 # ============================================================================
 set -euo pipefail
 
@@ -33,109 +41,152 @@ DTBNAME=rk3399-tn3399-v3.dtb
 BACKUP_ROOT=/root/kernel-rollback
 WORK=/root/kernel-deploy
 STAMP=$(date +%Y%m%d-%H%M%S)
+BK="${BACKUP_ROOT}/${STAMP}"
 
 echo "=============================================================="
 echo " 当前内核: $(uname -r)"
 echo " 新内核包: ${TARBALL}"
+echo " 备份目录: ${BK}"
 echo "=============================================================="
 
 # ---------------------------------------------------------------- 1. 校验
 if [ -f "${TARBALL}.sha256" ]; then
-  echo "==> [1/7] 校验 sha256"
+  echo "==> [1/8] 校验 sha256"
   ( cd "$(dirname "${TARBALL}")" && sha256sum -c "$(basename "${TARBALL}").sha256" )
 else
-  echo "==> [1/7] 未找到 .sha256 文件，跳过校验（建议手动核对）"
+  echo "==> [1/8] 未找到 .sha256 文件，跳过校验"
 fi
 
 # ---------------------------------------------------------------- 2. 解包
-echo "==> [2/7] 解包"
+echo "==> [2/8] 解包到 ${WORK}"
 rm -rf "${WORK}"; mkdir -p "${WORK}"
 tar --zstd -xf "${TARBALL}" -C "${WORK}"
 
 KREL=$(ls "${WORK}/modules/lib/modules/" 2>/dev/null | head -n1)
-if [ -z "${KREL}" ]; then
-  echo "错误: 压缩包里找不到 modules/lib/modules/<版本>"; exit 1
-fi
-NEW_SHORT="${KREL%%-*}"
+[ -n "${KREL}" ] || { echo "错误: 压缩包里找不到 modules/lib/modules/<版本>"; exit 1; }
+[ -f "${WORK}/kernel/Image" ]        || { echo "错误: 包内缺少 kernel/Image"; exit 1; }
+[ -f "${WORK}/kernel/${DTBNAME}" ]   || { echo "错误: 包内缺少 ${DTBNAME}"; exit 1; }
 echo "    包内内核版本: ${KREL}"
-[ -f "${WORK}/kernel/Image" ] || { echo "错误: 包内缺少 kernel/Image"; exit 1; }
-[ -f "${WORK}/kernel/${DTBNAME}" ] || { echo "错误: 包内缺少 ${DTBNAME}"; exit 1; }
-
-# 防止把 6.18 的内核包误装到 6.1 目录
-[ -n "${NEW_SHORT}" ] || { echo "错误: 无法解析内核版本"; exit 1; }
+echo "    模块数量: $(find "${WORK}/modules" -name '*.ko' | wc -l)"
 
 # ---------------------------------------------------------------- 3. 备份
-echo "==> [3/7] 备份当前引导环境到 ${BACKUP_ROOT}/${STAMP}"
-BK="${BACKUP_ROOT}/${STAMP}"
+echo "==> [3/8] 备份引导环境到 ${BK}"
 mkdir -p "${BK}"
-for f in Image uInitrd armbianEnv.txt boot.scr boot.cmd; do
+# 记录并保存符号链接（-a 保留链接本身），同时把“指向”写进文本，回滚时可精确复原
+for f in Image uInitrd; do
+  if [ -L "${BOOT}/${f}" ] || [ -e "${BOOT}/${f}" ]; then
+    readlink "${BOOT}/${f}" > "${BK}/${f}.target" 2>/dev/null || true
+    cp -a "${BOOT}/${f}" "${BK}/${f}.symlink"
+  fi
+done
+for f in armbianEnv.txt boot.scr boot.cmd; do
   [ -e "${BOOT}/${f}" ] && cp -a "${BOOT}/${f}" "${BK}/" || true
 done
 [ -e "${DTBDIR}/${DTBNAME}" ] && cp -a "${DTBDIR}/${DTBNAME}" "${BK}/${DTBNAME}.orig" || true
-echo "${KREL}"                        > "${BK}/installed-version.txt"
-uname -r                              > "${BK}/previous-running.txt"
-ls -1 /lib/modules                    > "${BK}/modules-before.txt"
-echo "    备份完成（旧内核模块 ${BACKUP_ROOT} 目录未动，仍在 /lib/modules 里）"
+echo "${KREL}"    > "${BK}/installed-version.txt"
+uname -r          > "${BK}/previous-running.txt"
+ls -1 /lib/modules > "${BK}/modules-before.txt"
+
+# 生成一个备份目录内的独立复原脚本（即使 rollback.sh 丢失也能救）
+cat > "${BK}/restore-here.sh" <<EOF
+#!/bin/bash
+# 恢复到 ${STAMP} 之前的引导状态
+set -e
+BOOT=/boot; DTBDIR=\$BOOT/dtb/rockchip
+[ -f "${BK}/Image.target" ]   && ln -sfn "\$(cat "${BK}/Image.target")"   \$BOOT/Image
+[ -f "${BK}/uInitrd.target" ] && ln -sfn "\$(cat "${BK}/uInitrd.target")" \$BOOT/uInitrd
+[ -f "${BK}/armbianEnv.txt" ] && cp -a "${BK}/armbianEnv.txt" \$BOOT/
+[ -f "${BK}/${DTBNAME}.orig" ] && cp -a "${BK}/${DTBNAME}.orig" \$DTBDIR/${DTBNAME}
+echo "已恢复到 ${STAMP} 之前的状态，现在可以 reboot。"
+EOF
+chmod +x "${BK}/restore-here.sh"
+echo "    备份完成: Image -> $(cat "${BK}/Image.target" 2>/dev/null || echo '(非链接)') ，uInitrd -> $(cat "${BK}/uInitrd.target" 2>/dev/null || echo '(非链接)')"
 
 # ---------------------------------------------------------------- 4. 模块
-echo "==> [4/7] 安装内核模块到 /lib/modules/${KREL}"
+echo "==> [4/8] 安装内核模块到 /lib/modules/${KREL}"
 mkdir -p /lib/modules
 if [ -d "/lib/modules/${KREL}" ]; then
-  echo "    同名模块目录已存在，移动到 ${BK}/modules-replaced-${KREL}"
+  echo "    已存在同名模块目录，移动到 ${BK}/modules-replaced-${KREL}"
   mv "/lib/modules/${KREL}" "${BK}/modules-replaced-${KREL}"
 fi
 cp -a "${WORK}/modules/lib/modules/${KREL}" /lib/modules/
 sync
-if command -v depmod >/dev/null 2>&1; then
-  depmod -a "${KREL}"
-  echo "    depmod 完成"
-fi
+depmod -a "${KREL}"
+echo "    depmod 完成: $(ls /lib/modules/${KREL}/modules.dep >/dev/null 2>&1 && echo modules.dep 已生成 || echo '警告: modules.dep 缺失')"
 
 # ---------------------------------------------------------------- 5. DTB
-echo "==> [5/7] 安装设备树 ${DTBNAME}"
+echo "==> [5/8] 安装设备树 ${DTBNAME}"
 mkdir -p "${DTBDIR}"
 cp -a "${WORK}/kernel/${DTBNAME}" "${DTBDIR}/${DTBNAME}"
+dtc -I dtb -O dts -o /tmp/verify-new.dts "${DTBDIR}/${DTBNAME}" 2>/dev/null \
+  && echo "    新 DTB 反编译校验通过（$(grep -c 'okay' /tmp/verify-new.dts) 个 okay）" \
+  || echo "    !! 新 DTB 反编译失败，建议回滚"
 
 # ---------------------------------------------------------------- 6. initramfs
-echo "==> [6/7] 生成 initramfs (mkinitramfs)"
-if command -v mkinitramfs >/dev/null 2>&1; then
-  mkinitramfs -o "${BOOT}/uInitrd.new" "${KREL}"
-  ls -lh "${BOOT}/uInitrd.new"
-  mv -f "${BOOT}/uInitrd.new" "${BOOT}/uInitrd"
-else
-  echo "    !! 找不到 mkinitramfs，请手动生成 uInitrd 后再重启"
-  exit 1
-fi
+echo "==> [6/8] 生成 initramfs 并打成 uImage"
+NEW_INITRD_RAW="${BOOT}/initrd.img-${KREL}"
+NEW_UINITRD="${BOOT}/uInitrd-${KREL}"
+rm -f "${NEW_INITRD_RAW}" "${NEW_UINITRD}"
+mkinitramfs -o "${NEW_INITRD_RAW}" "${KREL}"
+ls -lh "${NEW_INITRD_RAW}"
 
-# ---------------------------------------------------------------- 7. Image
-echo "==> [7/7] 安装内核镜像 /boot/Image"
-cp -a "${WORK}/kernel/Image" "${BOOT}/Image"
+# 按实际压缩算法选择 mkimage -C（Armbian 默认 COMPRESS=gzip，但这里做自动判断更稳）
+COMP="none"
+if   file "${NEW_INITRD_RAW}" | grep -qi gzip; then COMP="gzip"
+elif file "${NEW_INITRD_RAW}" | grep -qi zstd; then COMP="zstd"
+elif file "${NEW_INITRD_RAW}" | grep -qi lz4;  then COMP="lz4"
+elif file "${NEW_INITRD_RAW}" | grep -qi xz;   then COMP="xz"
+elif file "${NEW_INITRD_RAW}" | grep -qi bzip2;then COMP="bzip2"
+fi
+echo "    检测到压缩算法: ${COMP}"
+mkimage -A arm64 -O linux -T ramdisk -C "${COMP}" -n uInitrd -d "${NEW_INITRD_RAW}" "${NEW_UINITRD}" >/dev/null
+echo "    uImage 头部: $(head -c 4 "${NEW_UINITRD}" | od -An -tx1)"
+echo "    initrd 内含模块数: $(lsinitramfs "${NEW_INITRD_RAW}" 2>/dev/null | grep -c '\.ko$' || echo 0)"
+echo "    initrd 是否含新内核模块路径: $(lsinitramfs "${NEW_INITRD_RAW}" 2>/dev/null | grep -c "/${KREL}/" || echo 0) 条"
+
+# ---------------------------------------------------------------- 7. 内核镜像
+echo "==> [7/8] 安装内核镜像 vmlinuz-${KREL}"
+cp -a "${WORK}/kernel/Image" "${BOOT}/vmlinuz-${KREL}"
+[ -f "${WORK}/kernel/System.map-${KREL}" ] && cp -a "${WORK}/kernel/System.map-${KREL}" "${BOOT}/" || true
+[ -f "${WORK}/kernel/config-${KREL}" ]     && cp -a "${WORK}/kernel/config-${KREL}"     "${BOOT}/" || true
+
+# ---------------------------------------------------------------- 8. 切换符号链接
+echo "==> [8/8] 切换符号链接（这一步之后才算真正生效）"
+ln -sfn "vmlinuz-${KREL}" "${BOOT}/Image"
+ln -sfn "uInitrd-${KREL}" "${BOOT}/uInitrd"
 
 echo
 echo "=============================================================="
-echo " 安装完成，请检查以下三项后重启："
+echo " 安装完成。检查清单："
 echo "--------------------------------------------------------------"
-echo " 1) boot 分区内容"
-ls -lh "${BOOT}/Image" "${BOOT}/uInitrd" "${DTBDIR}/${DTBNAME}"
+echo " 1) 链接指向"
+ls -l "${BOOT}/Image" "${BOOT}/uInitrd"
 echo
-echo " 2) armbianEnv.txt 是否指向正确设备树"
-grep -nE "fdtfile|overlays|rootdev" "${BOOT}/armbianEnv.txt" || true
+echo " 2) 关键文件"
+ls -lh "${BOOT}/vmlinuz-${KREL}" "${BOOT}/uInitrd-${KREL}" "${DTBDIR}/${DTBNAME}"
+echo
+echo " 3) armbianEnv.txt 的 fdtfile"
+grep -nE "fdtfile" "${BOOT}/armbianEnv.txt" || true
 if grep -q "fdtfile=rockchip/${DTBNAME}" "${BOOT}/armbianEnv.txt" 2>/dev/null; then
   echo "    [OK] fdtfile 指向 rockchip/${DTBNAME}"
 else
-  echo "    [警告] 请确认 armbianEnv.txt 里 fdtfile=rockchip/${DTBNAME}"
+  echo "    [警告] fdtfile 与 ${DTBNAME} 不一致，请手工确认"
 fi
 echo
-echo " 3) 模块目录"
+echo " 4) 模块目录"
 ls -d /lib/modules/* 2>/dev/null
 echo
+echo " 5) 旧内核文件仍在（回滚靠它）"
+ls -l "${BOOT}"/vmlinuz-* "${BOOT}"/uInitrd-* 2>/dev/null
+echo "=============================================================="
 echo " 重启: reboot"
-echo " 回滚: bash $(dirname "$0")/rollback.sh"
+echo " 回滚: bash $(cd "$(dirname "$0")" && pwd)/rollback.sh --yes"
+echo "       （或 bash ${BK}/restore-here.sh）"
 echo "=============================================================="
 echo
 echo "重启后按顺序验证："
-echo "  uname -r                              # 应显示 ${KREL}"
+echo "  uname -r                              # 应为 ${KREL}"
 echo "  ls -l /dev/mpp_service                # 出现即 MPP 驱动加载成功"
-echo "  lsmod | grep -i mpp                   # rockchip_mpp / mpp_service_rkvdec..."
 echo "  dmesg | grep -iE 'mpp|vepu|vpu'       # 看编码器探测日志"
+echo "  cat /proc/mpp_service/supports        # 支持能力列表"
 echo "=============================================================="
