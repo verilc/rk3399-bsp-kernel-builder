@@ -10,8 +10,11 @@
 #
 # 使用方式（工作流里已自动执行）：
 #   make ARCH=arm64 rockchip_linux_defconfig
-#   ./scripts/kconfig/merge_config.sh -m <本文件>
+#   ./scripts/kconfig/merge_config.sh -m .config <本文件>
 #   make ARCH=arm64 olddefconfig
+#
+# ★ 注意：merge_config.sh 的第一个参数必须是【基底配置 .config】（源码里 INITFILE=$1），
+#   漏掉它会把片段本身当成整份配置的基底，导致 rockchip_linux_defconfig 被丢弃。
 # ============================================================================
 
 # ---------------------------------------------------------------------------

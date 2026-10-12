@@ -170,15 +170,29 @@ jobs:
           cd "${{ steps.disk.outputs.buildroot }}/kernel"
           make ARCH=arm64 rockchip_linux_defconfig
 
-          # 合并配置片段（补齐 Docker / WiFi / overlayfs 等）
-          # merge_config.sh 会以当前 .config 为基底，把片段叠加进去
-          ./scripts/kconfig/merge_config.sh -m \
+          # --- 基底配置前置检查 -------------------------------------------------
+          # 防止 defconfig 没生效就去合并片段（会导致整份配置丢失）
+          grep -qx "CONFIG_ARCH_ROCKCHIP=y" .config \
+            || { echo "::error::rockchip_linux_defconfig 未生效（缺 ARCH_ROCKCHIP）"; exit 1; }
+          echo "基底配置 OK: ARCH_ROCKCHIP=y，共 $(wc -l < .config) 行"
+
+          # --- 合并配置片段（补齐 Docker / WiFi / overlayfs 等）------------------
+          # ★ 关键：merge_config.sh 的【第一个参数是基底配置】，后面才是片段。
+          #   源码里 `INITFILE=$1`，漏掉 .config 会把片段当成整份配置的基底，
+          #   从而丢掉 rockchip_linux_defconfig（此坑已踩过一次，勿再改）。
+          ./scripts/kconfig/merge_config.sh -m .config \
             "${GITHUB_WORKSPACE}/config/rockchip-armbian.fragment"
+          grep -qx "CONFIG_ARCH_ROCKCHIP=y" .config \
+            || { echo "::error::合并 armbian 片段后 ARCH_ROCKCHIP 丢失，基底被覆盖"; exit 1; }
+
           if [ "${{ steps.p.outputs.minimal }}" = "true" ]; then
-            ./scripts/kconfig/merge_config.sh -m \
+            ./scripts/kconfig/merge_config.sh -m .config \
               "${GITHUB_WORKSPACE}/config/rockchip-minimal.fragment"
+            grep -qx "CONFIG_ARCH_ROCKCHIP=y" .config \
+              || { echo "::error::合并 minimal 片段后 ARCH_ROCKCHIP 丢失"; exit 1; }
           fi
           make ARCH=arm64 olddefconfig
+          echo "合并后配置行数: $(wc -l < .config)"
 
           # 关闭模块签名，避免自编模块被内核拒载
           ./scripts/config --file .config --disable MODULE_SIG || true
