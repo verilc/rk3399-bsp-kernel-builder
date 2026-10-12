@@ -162,6 +162,27 @@ jobs:
           grep -n "tn3399" "${DTSDIR}/Makefile"
 
       # ------------------------------------------------------------------
+      # 4.5 修复 RK808 稳压器驱动不绑定（600MHz 锁频根因）
+      # ------------------------------------------------------------------
+      - name: Fix RK808 regulator driver binding (600MHz lock fix)
+        run: |
+          set -e
+          cd "${{ steps.disk.outputs.buildroot }}/kernel"
+          # 根因：rk808 MFD 子设备名为 "rk808-regulator"，但驱动的
+          # platform_device_id 表 (rk8xx_regulator_id_table) 漏了该项。
+          # 由于 platform_match 一旦看到非空的 id_table 就只查它，
+          # "rk808-regulator" 永远匹配不上 -> 驱动从不绑定 ->
+          # RK808 全部稳压器 (vdd_cpu_l/vdd_center/vcc_ddr/...) 未注册 ->
+          # cpufreq 拿不到 CPU 供电、锁死在 U-Boot 默认的 600MHz。
+          # 补上这一项即可让驱动正常绑定。
+          grep -q '"rk808-regulator", 0' drivers/regulator/rk808-regulator.c \
+            || sed -i 's/{ "rk805-regulator", 0 },/{ "rk805-regulator", 0 },\n\t{ "rk808-regulator", 0 },/' drivers/regulator/rk808-regulator.c
+          grep -q '"rk808-regulator", 0' drivers/regulator/rk808-regulator.c \
+            || { echo "::error::未能将 rk808-regulator 加入驱动 id_table"; exit 1; }
+          echo "=== 验证 rk8xx_regulator_id_table ==="
+          sed -n '/rk8xx_regulator_id_table/,/^};/p' drivers/regulator/rk808-regulator.c
+
+      # ------------------------------------------------------------------
       # 5. 配置内核
       # ------------------------------------------------------------------
       - name: Configure kernel
