@@ -1,0 +1,16 @@
+[Unit]
+Description=MediaMTX RTSP/RTMP/HLS/WebRTC server (local test sink)
+Documentation=https://github.com/bluenviron/mediamtx
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root
+ExecStart=/root/mediamtx /root/mediamtx.yml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

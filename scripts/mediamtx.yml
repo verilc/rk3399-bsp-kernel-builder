@@ -1,0 +1,31 @@
+###############################################
+# MediaMTX 精简配置 —— 仅用于板端本机 RTSP/RTMP 验证
+# 完整配置见 https://github.com/bluenviron/mediamtx
+###############################################
+
+logLevel: info
+logDestinations: [stdout]
+
+# --- 协议开关（只开验证需要的）---
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [udp, multicast, tcp]   # 本机回环用 tcp/udp 都行
+rtpAddress: :8000
+rtcpAddress: :8001
+
+rtmp: yes
+rtmpAddress: :1935
+
+hls: no
+webrtc: no
+srt: no
+moq: no
+playback: no
+
+api: no
+metrics: no
+pprof: no
+
+# --- 允许任意路径自动创建（关键：否则发布时报 "path 'xxx' is not configured"）---
+paths:
+  all_others:
