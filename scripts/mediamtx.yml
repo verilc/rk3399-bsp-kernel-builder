@@ -16,13 +16,21 @@ rtcpAddress: :8001
 rtmp: yes
 rtmpAddress: :1935
 
-hls: no
-webrtc: no
+hls: yes
+hlsAddress: :8888
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcICEServers: []
+
 srt: no
 moq: no
 playback: no
 
-api: no
+api: yes
+apiAddress: :9997
 metrics: no
 pprof: no
 

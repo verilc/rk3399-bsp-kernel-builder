@@ -1,0 +1,14 @@
+[Unit]
+Description=RK3399 摄像头硬编码 网页测试服务
+After=network.target mediamtx.service
+Requires=mediamtx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/camweb/camweb.py
+WorkingDirectory=/opt/camweb
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

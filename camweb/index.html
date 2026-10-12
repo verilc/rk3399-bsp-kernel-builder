@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RK3399 摄像头硬编码 网页测试</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#c9d1d9;
+          --acc:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,"PingFang SC",Microsoft YaHei,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); box-shadow:0 0 8px var(--bad); }
+  .dot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  .badge { padding:2px 10px; border:1px solid var(--line); border-radius:999px; font-size:12px; }
+  .badge.hw { color:var(--acc); border-color:var(--acc); }
+  .spacer { flex:1; }
+  main { display:flex; gap:16px; padding:16px; align-items:flex-start; }
+  #stage { flex:1; min-width:0; }
+  #videowrap { position:relative; background:#000; border:1px solid var(--line); border-radius:10px;
+               aspect-ratio:16/9; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  #view, #imgview { width:100%; height:100%; object-fit:contain; display:none; }
+  #hint { position:absolute; color:#8b949e; }
+  .ov { position:absolute; padding:6px 10px; font-size:12px; background:rgba(0,0,0,.45); border-radius:8px; }
+  .ov.tl { top:10px; left:10px; display:flex; gap:6px; }
+  .ov.bl { bottom:10px; left:10px; }
+  .chip { padding:1px 8px; border:1px solid var(--line); border-radius:6px; }
+  aside { width:320px; flex:none; display:flex; flex-direction:column; gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card h2 { font-size:13px; margin:0 0 10px; color:#8b949e; font-weight:600; letter-spacing:.5px; }
+  .modes { display:flex; gap:8px; }
+  .modes button { flex:1; padding:8px 4px; border:1px solid var(--line); background:#0d1117; color:var(--fg);
+                  border-radius:8px; cursor:pointer; font-size:12px; }
+  .modes button.active { border-color:var(--acc); color:var(--acc); }
+  .row { display:flex; align-items:center; gap:8px; margin:8px 0; }
+  .row label { width:54px; color:#8b949e; }
+  .row select, .row input { flex:1; background:#0d1117; color:var(--fg); border:1px solid var(--line);
+                            border-radius:6px; padding:5px 8px; }
+  .val { width:64px; text-align:right; color:var(--acc); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .cell { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .cell .k { font-size:11px; color:#8b949e; }
+  .cell .v { font-size:18px; font-weight:600; }
+  .btns { display:flex; gap:8px; margin-top:4px; }
+  .btns button { flex:1; padding:9px; border-radius:8px; border:1px solid var(--line); cursor:pointer; font-size:13px; }
+  #btnStart { background:var(--ok); border-color:var(--ok); color:#03210f; font-weight:600; }
+  #btnStop { background:#21262d; color:var(--fg); }
+  .pipeline { font-size:11px; word-break:break-all; color:#8b949e; font-family:ui-monospace,Menlo,monospace; }
+  .note { font-size:11px; color:#8b949e; line-height:1.6; }
+  .note b { color:var(--warn); }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="dot"></div>
+  <h1>RK3399 摄像头采集 / 硬编码 网页测试</h1>
+  <span class="badge hw">VPU h264_rkmpp</span>
+  <div class="spacer"></div>
+  <span class="badge" id="modeBadge">未启动</span>
+</header>
+
+<main>
+  <section id="stage">
+    <div id="videowrap">
+      <video id="view" playsinline></video>
+      <img id="imgview" alt="mjpeg">
+      <div id="hint">选择模式并点「开始」</div>
+      <div class="ov tl">
+        <span class="chip" id="chipCodec">—</span>
+        <span class="chip" id="chipRes">—</span>
+        <span class="chip" id="chipRate">—</span>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h2>编码方式</h2>
+      <div class="modes">
+        <button data-mode="passthrough" class="active">H.264 直通</button>
+        <button data-mode="hwenc">H.264 硬编</button>
+        <button data-mode="mjpeg">MJPEG 原生</button>
+      </div>
+      <div class="note" id="modeNote" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>参数</h2>
+      <div class="row"><label>分辨率</label><select id="selRes"></select></div>
+      <div class="row"><label>帧率</label><select id="selFps"></select></div>
+      <div class="row" id="rowBr"><label>码率</label>
+        <input type="range" id="rngBps" min="500" max="12000" step="500" value="4000">
+        <span class="val" id="valBps">4000k</span></div>
+      <div class="row" id="rowGop"><label>GOP</label>
+        <input type="number" id="inpGop" min="1" max="120" step="1" value="30">
+        <span class="val" id="valGop">30</span></div>
+    </div>
+
+    <div class="card">
+      <h2>实时统计</h2>
+      <div class="grid2">
+        <div class="cell"><div class="k">帧率</div><div class="v" id="stFps">—</div></div>
+        <div class="cell"><div class="k">码率</div><div class="v" id="stKbps">—</div></div>
+        <div class="cell"><div class="k">ffmpeg CPU</div><div class="v" id="stCpu">—</div></div>
+        <div class="cell"><div class="k">运行时长</div><div class="v" id="stUp">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="btns">
+        <button id="btnStart">开始</button>
+        <button id="btnStop">停止</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Pipeline</h2>
+      <div class="pipeline" id="pipeline">—</div>
+    </div>
+
+    <div class="card">
+      <h2>说明</h2>
+      <div class="note">
+        • <b>H.264 直通</b>：摄像头自带 H.264 编码，仅转发，CPU≈0。<br>
+        • <b>H.264 硬编</b>：摄像头 MJPEG → VPU 硬件编码 h264_rkmpp（本页核心验证）。<br>
+        • <b>MJPEG 原生</b>：摄像头 MJPEG 原帧直出，零编码、最低延迟看原始画质。<br>
+        • 硬编/直通走 MediaMTX HLS，浏览器 hls.js 播放；MJPEG 走本服务 multipart。<br>
+        • 注：本板 CPU 当前被限制在 600MHz（PMIC 调压未接管），但不影响 VPU 硬件编解码速度。
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var mode = "passthrough";
+  var NATIVE = null;
+  var hls = null;
+  var timer = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  var MODE_NOTE = {
+    passthrough: "摄像头本身输出 H.264，-c copy 直接转发，CPU 占用≈0，延迟最低。",
+    hwenc: "摄像头 MJPEG → ffmpeg h264_rkmpp（VPU 硬件编码）。可调节码率/GOP，验证硬编码。",
+    mjpeg: "摄像头 MJPEG 原帧经本服务 multipart 直出，零编码、最低延迟看原始画质。"
+  };
+
+  function setDot(on) {
+    $("dot").className = "dot" + (on ? " on" : "");
+    $("modeBadge").textContent = on ? (mode + " 运行") : "未启动";
+  }
+
+  function showModeNote() { $("modeNote").textContent = MODE_NOTE[mode] || ""; }
+
+  function fillCaps() {
+    fetch("/api/camera").then(function (r) { return r.json(); }).then(function (d) {
+      NATIVE = d;
+      var res = {}, fps = {};
+      (d.formats || []).forEach(function (f) {
+        if (["MJPG", "H264", "MJPEG"].indexOf(f.format) < 0) return;
+        f.sizes.forEach(function (s) {
+          var key = s.w + "x" + s.h;
+          res[key] = true;
+          (s.fps || []).forEach(function (v) { fps[Math.round(v)] = true; });
+        });
+      });
+      var rs = Object.keys(res).sort(function (a, b) {
+        var pa = a.split("x"), pb = b.split("x");
+        return pa[0] * pa[1] - pb[0] * pb[1];
+      });
+      $("selRes").innerHTML = rs.map(function (r) {
+        return '<option value="' + r + '"' + (r === "1920x1080" ? " selected" : "") + ">" + r + "</option>";
+      }).join("");
+      var fs = Object.keys(fps).map(Number).sort(function (a, b) { return a - b; });
+      $("selFps").innerHTML = fs.map(function (v) {
+        return '<option value="' + v + '"' + (v === 30 ? " selected" : "") + ">" + v + "</option>";
+      }).join("");
+    }).catch(function () { /* ignore */ });
+  }
+
+  function toggleControls() {
+    var hw = (mode === "hwenc");
+    $("rowBr").style.opacity = hw ? "1" : "0.4";
+    $("rowGop").style.opacity = hw ? "1" : "0.4";
+    $("rngBps").disabled = !hw;
+    $("inpGop").disabled = !hw;
+  }
+
+  function stopPlayback() {
+    if (hls) { hls.destroy(); hls = null; }
+    $("view").style.display = "none";
+    $("imgview").style.display = "none";
+    $("view").pause();
+    $("imgview").src = "";
+  }
+
+  function startPlayback() {
+    stopPlayback();
+    $("hint").style.display = "none";
+    if (mode === "mjpeg") {
+      $("imgview").style.display = "block";
+      $("imgview").src = "/video/mjpeg?t=" + Date.now();
+    } else {
+      var url = "/hls/cam/index.m3u8";
+      $("view").style.display = "block";
+      if (window.Hls && Hls.isSupported()) {
+        hls = new Hls({ liveSyncDuration: 1, maxLiveSyncPlaybackRate: 1.5, lowLatencyMode: true });
+        hls.loadSource(url);
+        hls.attachMedia($("view"));
+        hls.on(Hls.Events.ERROR, function (e, data) {
+          if (data.fatal) { hls.destroy(); hls = null; }
+        });
+      } else if ($("view").canPlayType("application/vnd.apple.mpegurl")) {
+        $("view").src = url;
+      }
+      $("view").play().catch(function () {});
+    }
+  }
+
+  function refresh() {
+    fetch("/api/status").then(function (r) { return r.json(); }).then(function (s) {
+      setDot(s.running);
+      $("stFps").textContent = s.fps != null ? s.fps.toFixed(1) : "—";
+      $("stKbps").textContent = s.kbps != null ? Math.round(s.kbps) + "k" : "—";
+      $("stCpu").textContent = s.cpu != null ? s.cpu + "%" : "—";
+      $("stUp").textContent = s.uptime ? s.uptime + "s" : "—";
+      if (s.running) {
+        var p = s.params || {};
+        $("chipCodec").textContent = mode === "mjpeg" ? "MJPEG" : "H.264";
+        $("chipRes").textContent = (p.width || "?") + "x" + (p.height || "?");
+        $("chipRate").textContent = (p.bitrate || "?") + "k";
+        $("pipeline").textContent = s.log_tail && s.log_tail.length
+          ? s.log_tail[s.log_tail.length - 1] : "";
+      } else {
+        $("chipCodec").textContent = $("chipRes").textContent = $("chipRate").textContent = "—";
+      }
+    }).catch(function () {});
+  }
+
+  // 事件绑定
+  document.querySelectorAll(".modes button").forEach(function (b) {
+    b.onclick = function () {
+      document.querySelectorAll(".modes button").forEach(function (x) { x.classList.remove("active"); });
+      b.classList.add("active");
+      mode = b.getAttribute("data-mode");
+      showModeNote();
+      toggleControls();
+    };
+  });
+  $("rngBps").oninput = function () { $("valBps").textContent = this.value + "k"; };
+  $("inpGop").oninput = function () { $("valGop").textContent = this.value; };
+
+  $("btnStart").onclick = function () {
+    if (!NATIVE) { alert("摄像头能力未就绪，请稍候"); return; }
+    var rp = $("selRes").value.split("x");
+    var body = {
+      mode: mode,
+      width: +rp[0], height: +rp[1],
+      fps: +$("selFps").value,
+      bitrate: +$("rngBps").value,
+      gop: +$("inpGop").value
+    };
+    fetch("/api/start", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) { alert("启动失败: " + d.msg); return; }
+        startPlayback();
+        refresh();
+      });
+  };
+
+  $("btnStop").onclick = function () {
+    fetch("/api/stop", { method: "POST" }).then(function () {
+      stopPlayback();
+      $("hint").style.display = "block";
+      setDot(false);
+      refresh();
+    });
+  };
+
+  // 初始化
+  showModeNote();
+  toggleControls();
+  fillCaps();
+  refresh();
+  timer = setInterval(refresh, 1000);
+})();
+</script>
+</body>
+</html>
