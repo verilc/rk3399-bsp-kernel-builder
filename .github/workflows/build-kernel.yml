@@ -183,6 +183,38 @@ jobs:
           sed -n '/rk8xx_regulator_id_table/,/^};/p' drivers/regulator/rk808-regulator.c
 
       # ------------------------------------------------------------------
+      # 4.6 修复 RK808 CLKOUT 驱动不绑定（WiFi / 蓝牙打不开的根因）
+      # ------------------------------------------------------------------
+      - name: Fix RK808 clkout driver binding (WiFi + Bluetooth root cause)
+        run: |
+          set -e
+          cd "${{ steps.disk.outputs.buildroot }}/kernel"
+          # 根因（与上面 4.5 完全同类）：
+          #   drivers/mfd/rk808.c 里 RK808 的 MFD cell 是
+          #       { .name = "rk808-clkout", }        ← 注意：没有 of_compatible
+          #   于是平台设备名 = "rk808-clkout"，且【没有 of_node】。
+          #   而 drivers/clk/clk-rk808.c 的驱动虽然 .driver.name = "rk808-clkout"，
+          #   却【没有 of_match_table】，且它的 id_table (rk8xx_clk_id_table)
+          #   只列了 rk805/809/816/817/818-clk —— 唯独漏了 rk808-clkout。
+          #   platform_match() 的规则是：只要有非空 id_table，就只查 id_table、
+          #   永不回退到"驱动名 == 设备名"的比较 ⇒ 驱动一辈子绑定不上。
+          # 后果链：
+          #   时钟 rk808-clkout2 不注册
+          #     → sdio-pwrseq 的 ext_clock 永远 -EPROBE_DEFER
+          #       → mmc@fe310000 (SDIO 主机, alias mmc2) 跟着 deferred
+          #         → SDIO 总线上没有设备 → brcmfmac 不加载 → 【没有 wlan0】
+          #         → 蓝牙 serdev 同样 deferred → 【没有 hci0】
+          # 现象：`ls /sys/bus/platform/drivers/rk808-clkout/` 只有 bind/unbind，
+          #       且 /sys/kernel/debug/devices_deferred 里躺着 sdio-pwrseq / fe310000.mmc。
+          # 修法：把丢失的 id 补进 id_table（1 行）。与 4.5 同理、同风险等级。
+          grep -q '"rk808-clkout", 0' drivers/clk/clk-rk808.c \
+            || sed -i 's/{ "rk805-clk", 0 },/{ "rk805-clk", 0 },\n\t{ "rk808-clkout", 0 },/' drivers/clk/clk-rk808.c
+          grep -q '"rk808-clkout", 0' drivers/clk/clk-rk808.c \
+            || { echo "::error::未能将 rk808-clkout 加入 rk8xx_clk_id_table（源码结构可能变了，sed 锚点失效）"; exit 1; }
+          echo "=== 验证 rk8xx_clk_id_table ==="
+          sed -n '/rk8xx_clk_id_table\[\] = {/,/^};/p' drivers/clk/clk-rk808.c
+
+      # ------------------------------------------------------------------
       # 5. 配置内核
       # ------------------------------------------------------------------
       - name: Configure kernel
@@ -243,6 +275,19 @@ jobs:
             echo "  [OK]   模块签名已关闭"
           fi
           [ "${FAIL}" = "0" ] || { echo "::error::关键内核配置检查失败"; exit 1; }
+
+      # ------------------------------------------------------------------
+      # 5.5 设备树预检（快速失败）
+      # ------------------------------------------------------------------
+      - name: Pre-flight device tree check
+        run: |
+          set -e
+          cd "${{ steps.disk.outputs.buildroot }}/kernel"
+          # 只编 DTS（1 分钟左右）。放在主编译之前，避免 DTS 里写错标签/语法
+          # 却要等 Image 编完 1~3 小时才报错。
+          make ARCH=arm64 dtbs -j"${{ steps.p.outputs.jobs }}"
+          ls -l arch/arm64/boot/dts/rockchip/rk3399-tn3399-v3.dtb
+          echo "设备树编译通过"
 
       # ------------------------------------------------------------------
       # 6. 编译（带 ccache，重跑可大幅加速）

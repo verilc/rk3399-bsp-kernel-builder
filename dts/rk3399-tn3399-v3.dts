@@ -770,7 +770,20 @@
 	status = "okay";
 };
 
+/*
+ * uart4 与 spi1 共用引脚，二者只能有一个 enabled。
+ *
+ * 云台串口的【主通道】是 Nano 的 USB（/dev/ttyUSBx → udev 链接 /dev/pantilt）；
+ * 这里把 uart4 打开、spi1 关掉，是为了保留 uart4 作为备用通道：
+ *   引出位置 =「串口×7」那排、左下往右第 5 个四角座第 3 针，
+ *   电平是 RS232（±5.9V，板载 SP3232EEN），要接 5V-TTL 设备得外加
+ *   MAX3232/SP3232 模块，然后把 PANTILT_TTY 改回 /dev/ttyS4、波特率 19200。
+ */
 &spi1 {
+	status = "disabled";
+};
+
+&uart4 {
 	status = "okay";
 };
 

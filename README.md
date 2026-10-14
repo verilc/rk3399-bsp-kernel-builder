@@ -69,6 +69,17 @@
 这些节点在 BSP 的 `rk3399.dtsi` 里**已全部定义好**（默认 `disabled`），所以移植量就是打开开关。
 `TN3399_V3` 本质是 VAMRS ROCK960 的衍生板，而 BSP 树里自带 rock960 支持，兼容性良好。
 
+除此之外还改了两处（与 MPP 无关，是为了保留云台串口的**备用通道**）：
+
+```dts
+&spi1 { status = "disabled"; };   /* uart4 与 spi1 共用引脚，二者只能开一个 */
+&uart4 { status = "okay"; };      /* 串口×7 那排、左下往右第 5 个四角座第 3 针 */
+```
+
+> uart4 是 **RS232 电平**（板载 SP3232EEN，±5.9V），要接 5V-TTL 设备得外加 MAX3232/SP3232。
+> 云台串口的**主通道走 Nano 的 USB**（`/dev/ttyUSBx` → udev 链接 `/dev/pantilt`），
+> uart4 只是留的后路：真要切过去，把 `PANTILT_TTY=/dev/ttyS4`、`PANTILT_BAUD=19200` 改回来即可。
+
 ### 关于内核配置的关键点
 
 `rockchip_linux_defconfig` **自带** `CONFIG_ROCKCHIP_MPP_SERVICE=y` / `ROCKCHIP_MPP_VEPU2=y`
@@ -80,6 +91,41 @@
 - 还有 RTC、蓝牙、`COMPAT`、cgroup 系列等
 
 这些都在 `config/rockchip-armbian.fragment` 里补齐了。
+
+### 关于内核源码的两处补丁（Rockchip BSP 的同一类 bug）
+
+BSP 内核里有两个平台驱动**永远绑不上设备**，而且两者是同一个病根：
+
+> `platform_match()` 的规则是：**只要驱动有非空 `id_table`，就只查 `id_table`，
+> 永不回退到「驱动名 == 设备名」的比较**。
+> 所以 MFD 子设备名如果没被列进驱动的 `id_table`、而驱动又没有 `of_match_table`
+> （或设备没有 `of_node`），这个驱动就一辈子不会 probe。
+
+| 补丁（各 1 行） | 位置 | 不修的后果 |
+|---|---|---|
+| `+{ "rk808-regulator", 0 }` | `drivers/regulator/rk808-regulator.c` | RK808 稳压器全不注册 → cpufreq 拿不到 CPU 供电 → **CPU 锁死在 U-Boot 默认的 600 MHz** |
+| `+{ "rk808-clkout", 0 }` | `drivers/clk/clk-rk808.c` | 32.768 kHz `rk808-clkout2` 不注册 → `sdio-pwrseq` 的 `ext_clock` 永远 `-EPROBE_DEFER` → `mmc@fe310000`(SDIO) 跟着 deferred → **没有 wlan0 也没有 hci0，WiFi / 蓝牙全废** |
+
+工作流里对应的两步：*Fix RK808 regulator driver binding* 与
+*Fix RK808 clkout driver binding*。两步都用 `grep -q … || sed -i …` 保证幂等，
+改不动就 `::error::` 直接失败（防止源码结构变化后悄悄失效）。
+
+**诊断这类问题的手法**（下次遇到类似症状可直接套）：
+
+```bash
+# 1) 驱动有没有绑上设备？空的 = 没绑上
+ls /sys/bus/platform/drivers/rk808-clkout/
+# 2) 设备有没有 of_node？显示 platform:xxx 就说明没有（有则是 of:N...T...Cxxxx）
+cat /sys/bus/platform/devices/rk808-clkout/modalias
+# 3) 谁在等谁？卡住的设备都在这
+cat /sys/kernel/debug/devices_deferred
+# 4) 只读证据：既然设备名 == 驱动名却匹配不上，就是 id_table 挡的
+```
+
+> ⚠️ 旧镜像（2026-10-12 及更早编译的）**没有** clkout 这个补丁，那批镜像烧上去 WiFi/蓝牙
+> 是打不开的。板子上曾用一个开机服务（`wifi-clkout-fix.service`，靠
+> `driver_override` + `bind` 绕过匹配）临时补救 —— 补丁落地后该服务变成**冗余兜底**，
+> 留着无害（幂等），删掉也不影响。
 
 ---
 
